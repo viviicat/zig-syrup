@@ -3,6 +3,10 @@ const std = @import("std");
 
 pub const Writer = @import("Writer.zig");
 
+const generics = @import("generics.zig");
+pub const Generic = generics.Generic;
+pub const Integral = generics.Integral;
+
 comptime {
     std.testing.refAllDecls(@This());
 }

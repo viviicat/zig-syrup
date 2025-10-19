@@ -1,4 +1,5 @@
 const std = @import("std");
+const Generic = @import("generics.zig").Generic;
 
 const Writer = @This();
 
@@ -9,6 +10,7 @@ pub fn write(self: Writer, val: anytype) !void {
     const ValInfo = @typeInfo(ValType);
 
     try switch (ValType) {
+        Generic => self.writeGeneric(val),
         bool => self.writeBoolean(val),
         f32 => self.writeFloat(val),
         f64 => self.writeDouble(val),
@@ -16,9 +18,27 @@ pub fn write(self: Writer, val: anytype) !void {
         else => switch (ValInfo) {
             .int => self.writeInt(val),
             .comptime_int => self.writeInt(val),
+            // TODO: support sequence slices
             .pointer => @compileError("use one of writeString, writeData, writeSymbol with a byte slice."),
             else => @compileError("unsupported type!" ++ @typeName(ValType)),
         },
+    };
+}
+
+pub fn writeGeneric(self: Writer, gen: Generic) !void {
+    return switch (gen) {
+        .bool => |val| try self.writeBoolean(val),
+        .float => |val| try self.writeFloat(val),
+        .double => |val| try self.writeDouble(val),
+        .data => |val| try self.writeData(val),
+        .string => |val| try self.writeString(val),
+        .symbol => |val| try self.writeSymbol(val),
+        .int => |int| switch (int) {
+            .i32 => |val| try self.writeInt(val),
+            .i64 => |val| try self.writeInt(val),
+            .i128 => |val| try self.writeInt(val),
+        },
+        .sequence => |val| try self.writeSequence(val),
     };
 }
 
@@ -59,21 +79,29 @@ pub fn writeDouble(self: Writer, val: f64) !void {
 }
 
 pub fn writeData(self: Writer, val: []const u8) !void {
-    try self.writeGenericData(val, ':');
+    try self.writeDataInternal(val, ':');
 }
 
 pub fn writeString(self: Writer, val: []const u8) !void {
-    try self.writeGenericData(val, '"');
+    try self.writeDataInternal(val, '"');
 }
 
 pub fn writeSymbol(self: Writer, val: []const u8) !void {
-    try self.writeGenericData(val, '\'');
+    try self.writeDataInternal(val, '\'');
 }
 
-fn writeGenericData(self: Writer, val: []const u8, sep: u8) !void {
+fn writeDataInternal(self: Writer, val: []const u8, sep: u8) !void {
     try self.io_writer.printInt(val.len, 10, .lower, .{});
     try self.io_writer.writeByte(sep);
     try self.io_writer.writeAll(val);
+}
+
+pub fn writeSequence(self: Writer, val: []const Generic) std.Io.Writer.Error!void {
+    try self.io_writer.writeByte('[');
+    for (val) |gen| {
+        try self.writeGeneric(gen);
+    }
+    try self.io_writer.writeByte(']');
 }
 
 test "basic datatype" {
@@ -126,4 +154,22 @@ test "symbol datatype" {
 
     try writer.writeSymbol("hämta");
     try std.testing.expectEqualStrings("6'hämta", output.written());
+}
+
+test "sequence datatype" {
+    const sequence = [_]Generic{
+        .{ .string = "a test" }, .{ .int = .{ .i32 = 45 } }, .{ .symbol = "shark" }, .{
+            .sequence = &[_]Generic{
+                .{ .int = .{ .i128 = -170_141_183_460_469_231_731_687_303_715_884_105_690 } },
+                .{ .string = "testing nesting" },
+            },
+        },
+    };
+
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    var writer = Writer{ .io_writer = &output.writer };
+    defer output.deinit();
+
+    try writer.writeSequence(&sequence);
+    try std.testing.expectEqualStrings("[6\"a test45+5'shark[170141183460469231731687303715884105690-15\"testing nesting]]", output.written());
 }
