@@ -16,7 +16,7 @@ pub fn write(self: Writer, val: anytype) !void {
         else => switch (ValInfo) {
             .int => self.writeInt(val),
             .comptime_int => self.writeInt(val),
-            .pointer => @compileError("use either writeString or writeData with a byte slice."),
+            .pointer => @compileError("use one of writeString, writeData, writeSymbol with a byte slice."),
             else => @compileError("unsupported type!" ++ @typeName(ValType)),
         },
     };
@@ -59,14 +59,20 @@ pub fn writeDouble(self: Writer, val: f64) !void {
 }
 
 pub fn writeData(self: Writer, val: []const u8) !void {
-    try self.io_writer.printInt(val.len, 10, .lower, .{});
-    try self.io_writer.writeByte(':');
-    try self.io_writer.writeAll(val);
+    try self.writeGenericData(val, ':');
 }
 
 pub fn writeString(self: Writer, val: []const u8) !void {
+    try self.writeGenericData(val, '"');
+}
+
+pub fn writeSymbol(self: Writer, val: []const u8) !void {
+    try self.writeGenericData(val, '\'');
+}
+
+fn writeGenericData(self: Writer, val: []const u8, sep: u8) !void {
     try self.io_writer.printInt(val.len, 10, .lower, .{});
-    try self.io_writer.writeByte('"');
+    try self.io_writer.writeByte(sep);
     try self.io_writer.writeAll(val);
 }
 
@@ -111,4 +117,13 @@ test "data datatype" {
 
     try writer.writeData(&[_]u8{ 69, 68, 67, 66, 65 });
     try std.testing.expectEqualSlices(u8, &[_]u8{ 53, 58, 69, 68, 67, 66, 65 }, output.written());
+}
+
+test "symbol datatype" {
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    var writer = Writer{ .io_writer = &output.writer };
+    defer output.deinit();
+
+    try writer.writeSymbol("hämta");
+    try std.testing.expectEqualStrings("6'hämta", output.written());
 }
