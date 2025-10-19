@@ -1,16 +1,32 @@
 const std = @import("std");
 const Generic = @import("generics.zig").Generic;
+const Record = @import("Record.zig");
+const tags = @import("tags.zig");
 
 const Writer = @This();
 
-io_writer: *std.Io.Writer,
+pub const WriterError = error{
+    /// `endSequence` was called too many times.
+    SequenceUnderflow,
+    /// `endRecord` was called too many times.
+    RecordUnderflow,
+};
 
-pub fn write(self: Writer, val: anytype) !void {
+const WritingError = WriterError || std.Io.Writer.Error;
+
+io_writer: *std.Io.Writer,
+sequence_depth: u32 = 0,
+record_depth: u32 = 0,
+
+pub fn write(self: *Writer, val: anytype) !void {
     const ValType = @TypeOf(val);
     const ValInfo = @typeInfo(ValType);
 
     try switch (ValType) {
         Generic => self.writeGeneric(val),
+        *const Generic => self.writeGeneric(val),
+        Record => self.writeRecord(val),
+        *const Record => self.writeRecord(val),
         bool => self.writeBoolean(val),
         f32 => self.writeFloat(val),
         f64 => self.writeDouble(val),
@@ -19,14 +35,14 @@ pub fn write(self: Writer, val: anytype) !void {
             .int => self.writeInt(val),
             .comptime_int => self.writeInt(val),
             // TODO: support sequence slices
-            .pointer => @compileError("use one of writeString, writeData, writeSymbol with a byte slice."),
+            .pointer => @compileError("use one of writeString, writeData, writeSymbol with a byte slice, or wrap it in a Generic to specify its type."),
             else => @compileError("unsupported type!" ++ @typeName(ValType)),
         },
     };
 }
 
-pub fn writeGeneric(self: Writer, gen: Generic) !void {
-    return try switch (gen) {
+pub fn writeGeneric(self: *Writer, gen: *const Generic) !void {
+    return try switch (gen.*) {
         .bool => |val| self.writeBoolean(val),
         .float => |val| self.writeFloat(val),
         .double => |val| self.writeDouble(val),
@@ -39,18 +55,19 @@ pub fn writeGeneric(self: Writer, gen: Generic) !void {
             .i128 => |val| self.writeInt(val),
         },
         .sequence => |val| self.writeSequence(val),
+        .record => |val| self.writeRecord(&val),
     };
 }
 
-pub fn writeBoolean(self: Writer, val: bool) !void {
+pub fn writeBoolean(self: *Writer, val: bool) !void {
     if (val) {
-        try self.io_writer.writeByte('t');
+        try self.io_writer.writeByte(tags.True);
     } else {
-        try self.io_writer.writeByte('f');
+        try self.io_writer.writeByte(tags.False);
     }
 }
 
-pub fn writeInt(self: Writer, val: anytype) !void {
+pub fn writeInt(self: *Writer, val: anytype) !void {
     const ValType = @TypeOf(val);
     const ValInfo = @typeInfo(ValType);
     switch (ValInfo) {
@@ -61,47 +78,84 @@ pub fn writeInt(self: Writer, val: anytype) !void {
 
     if (val >= 0) {
         try self.io_writer.printInt(val, 10, .lower, .{});
-        try self.io_writer.writeByte('+');
+        try self.io_writer.writeByte(tags.PositiveInt);
     } else {
         try self.io_writer.printInt(-val, 10, .lower, .{});
-        try self.io_writer.writeByte('-');
+        try self.io_writer.writeByte(tags.NegativeInt);
     }
 }
 
-pub fn writeFloat(self: Writer, val: f32) !void {
-    try self.io_writer.writeByte('F');
+pub fn writeFloat(self: *Writer, val: f32) !void {
+    try self.io_writer.writeByte(tags.Float);
     try self.io_writer.writeAll(&std.mem.toBytes(std.mem.nativeToBig(u32, @bitCast(val))));
 }
 
-pub fn writeDouble(self: Writer, val: f64) !void {
-    try self.io_writer.writeByte('D');
+pub fn writeDouble(self: *Writer, val: f64) !void {
+    try self.io_writer.writeByte(tags.Double);
     try self.io_writer.writeAll(&std.mem.toBytes(std.mem.nativeToBig(u64, @bitCast(val))));
 }
 
-pub fn writeData(self: Writer, val: []const u8) !void {
-    try self.writeDataInternal(val, ':');
+pub fn writeData(self: *Writer, val: []const u8) !void {
+    try self.writeDataInternal(val, tags.Data);
 }
 
-pub fn writeString(self: Writer, val: []const u8) !void {
-    try self.writeDataInternal(val, '"');
+pub fn writeString(self: *Writer, val: []const u8) !void {
+    try self.writeDataInternal(val, tags.String);
 }
 
-pub fn writeSymbol(self: Writer, val: []const u8) !void {
-    try self.writeDataInternal(val, '\'');
+pub fn writeSymbol(self: *Writer, val: []const u8) !void {
+    try self.writeDataInternal(val, tags.Symbol);
 }
 
-fn writeDataInternal(self: Writer, val: []const u8, sep: u8) !void {
+fn writeDataInternal(self: *Writer, val: []const u8, sep: u8) !void {
     try self.io_writer.printInt(val.len, 10, .lower, .{});
     try self.io_writer.writeByte(sep);
     try self.io_writer.writeAll(val);
 }
 
-pub fn writeSequence(self: Writer, val: []const Generic) std.Io.Writer.Error!void {
-    try self.io_writer.writeByte('[');
-    for (val) |gen| {
-        try self.writeGeneric(gen);
+pub fn startSequence(self: *Writer) !void {
+    self.sequence_depth += 1;
+    try self.io_writer.writeByte(tags.StartSequence);
+}
+
+pub fn endSequence(self: *Writer) !void {
+    if (self.sequence_depth == 0) {
+        return error.SequenceUnderflow;
     }
-    try self.io_writer.writeByte(']');
+
+    self.sequence_depth -= 0;
+    try self.io_writer.writeByte(tags.EndSequence);
+}
+
+pub fn writeSequence(self: *Writer, val: []const Generic) WritingError!void {
+    try self.startSequence();
+    for (val) |gen| {
+        try self.writeGeneric(&gen);
+    }
+    try self.endSequence();
+}
+
+pub fn startRecord(self: *Writer, label: *const Generic) !void {
+    self.record_depth += 1;
+    try self.io_writer.writeByte(tags.StartRecord);
+    try self.writeGeneric(label);
+}
+
+pub fn endRecord(self: *Writer) !void {
+    if (self.record_depth == 0) {
+        return error.RecordUnderflow;
+    }
+
+    self.record_depth -= 0;
+    try self.io_writer.writeByte(tags.EndRecord);
+}
+
+pub fn writeRecord(self: *Writer, val: *const Record) WritingError!void {
+    try self.startRecord(val.label);
+    for (val.fields) |field| {
+        try self.writeGeneric(&field);
+    }
+    try self.endRecord();
 }
 
 test "basic datatype" {
@@ -158,12 +212,13 @@ test "symbol datatype" {
 
 test "sequence datatype" {
     const sequence = [_]Generic{
-        .{ .string = "a test" }, .{ .int = .{ .i32 = 45 } }, .{ .symbol = "shark" }, .{
-            .sequence = &.{
-                .{ .int = .{ .i128 = -170_141_183_460_469_231_731_687_303_715_884_105_690 } },
-                .{ .string = "testing nesting" },
-            },
-        },
+        .{ .string = "a test" },
+        .{ .int = .{ .i32 = 45 } },
+        .{ .symbol = "shark" },
+        .{ .sequence = &.{
+            .{ .int = .{ .i128 = -170_141_183_460_469_231_731_687_303_715_884_105_690 } },
+            .{ .string = "testing nesting" },
+        } },
     };
 
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
@@ -172,4 +227,27 @@ test "sequence datatype" {
 
     try writer.writeSequence(&sequence);
     try std.testing.expectEqualStrings("[6\"a test45+5'shark[170141183460469231731687303715884105690-15\"testing nesting]]", output.written());
+}
+
+test "record datatype" {
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    var writer = Writer{ .io_writer = &output.writer };
+    defer output.deinit();
+
+    const record = Record{
+        .label = &.{
+            .sequence = &[_]Generic{
+                .{ .string = "hello" },
+                .{ .int = .{ .i32 = 2456 } },
+            },
+        },
+        .fields = &[_]Generic{
+            .{ .bool = true },
+            .{ .bool = false },
+            .{ .symbol = "dogs-and-cats" },
+        },
+    };
+
+    try writer.write(&record);
+    try std.testing.expectEqualStrings("<[5\"hello2456+]tf13'dogs-and-cats>", output.written());
 }

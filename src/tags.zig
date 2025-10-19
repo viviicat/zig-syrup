@@ -1,0 +1,13 @@
+pub const True = 't';
+pub const False = 'f';
+pub const PositiveInt = '+';
+pub const NegativeInt = '-';
+pub const Float = 'F';
+pub const Double = 'D';
+pub const Data = ':';
+pub const String = '"';
+pub const Symbol = '\'';
+pub const StartSequence = '[';
+pub const EndSequence = ']';
+pub const StartRecord = '<';
+pub const EndRecord = '>';

@@ -1,3 +1,5 @@
+const Record = @import("Record.zig");
+
 // TODO: any way to make it generic for any size?
 pub const Integral = union(enum) {
     i32: i32,
@@ -14,4 +16,5 @@ pub const Generic = union(enum) {
     string: []const u8,
     symbol: []const u8,
     sequence: []const Generic,
+    record: Record,
 };
