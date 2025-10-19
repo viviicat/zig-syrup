@@ -1,3 +1,6 @@
+//! A writer for the Syrup data format. Can write all of the supported Syrup datatypes to an underlying
+//! `std.Io.Writer`.
+
 const std = @import("std");
 const Generic = @import("generics.zig").Generic;
 const Record = @import("Record.zig");
@@ -15,8 +18,8 @@ pub const WriterError = error{
 const WritingError = WriterError || std.Io.Writer.Error;
 
 io_writer: *std.Io.Writer,
-sequence_depth: u32 = 0,
-record_depth: u32 = 0,
+sequence_depth: usize = 0,
+record_depth: usize = 0,
 
 /// Write a supported type to the writer.
 pub fn write(self: *Writer, val: anytype) !void {
