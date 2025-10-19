@@ -6,10 +6,10 @@ const tags = @import("tags.zig");
 const Writer = @This();
 
 pub const WriterError = error{
-    /// `endSequence` was called too many times.
-    SequenceUnderflow,
-    /// `endRecord` was called too many times.
+    /// Tried to end a record but we are not inside any records.
     RecordUnderflow,
+    /// Tried to end a sequence but we are not inside any sequences.
+    SequenceUnderflow,
 };
 
 const WritingError = WriterError || std.Io.Writer.Error;
@@ -18,6 +18,7 @@ io_writer: *std.Io.Writer,
 sequence_depth: u32 = 0,
 record_depth: u32 = 0,
 
+/// Write a supported type to the writer.
 pub fn write(self: *Writer, val: anytype) !void {
     const ValType = @TypeOf(val);
     const ValInfo = @typeInfo(ValType);
@@ -58,6 +59,7 @@ pub fn write(self: *Writer, val: anytype) !void {
     };
 }
 
+/// Write a `Generic` to the writer.
 pub fn writeGeneric(self: *Writer, gen: *const Generic) !void {
     return try switch (gen.*) {
         .bool => |val| self.writeBoolean(val),
@@ -76,6 +78,7 @@ pub fn writeGeneric(self: *Writer, gen: *const Generic) !void {
     };
 }
 
+/// Write a boolean value to the writer.
 pub fn writeBoolean(self: *Writer, val: bool) !void {
     if (val) {
         try self.io_writer.writeByte(tags.True);
@@ -84,6 +87,7 @@ pub fn writeBoolean(self: *Writer, val: bool) !void {
     }
 }
 
+/// Write an integer value of any width to the writer.
 pub fn writeInt(self: *Writer, val: anytype) !void {
     const ValType = @TypeOf(val);
     const ValInfo = @typeInfo(ValType);
@@ -102,24 +106,29 @@ pub fn writeInt(self: *Writer, val: anytype) !void {
     }
 }
 
+/// Write a f32 float to the writer.
 pub fn writeFloat(self: *Writer, val: f32) !void {
     try self.io_writer.writeByte(tags.Float);
     try self.io_writer.writeAll(&std.mem.toBytes(std.mem.nativeToBig(u32, @bitCast(val))));
 }
 
+/// Write a f64 float to the writer.
 pub fn writeDouble(self: *Writer, val: f64) !void {
     try self.io_writer.writeByte(tags.Double);
     try self.io_writer.writeAll(&std.mem.toBytes(std.mem.nativeToBig(u64, @bitCast(val))));
 }
 
+/// Write a byte slice to the writer as data.
 pub fn writeData(self: *Writer, val: []const u8) !void {
     try self.writeDataInternal(val, tags.Data);
 }
 
+/// Write a byte slice to the writer as a string.
 pub fn writeString(self: *Writer, val: []const u8) !void {
     try self.writeDataInternal(val, tags.String);
 }
 
+/// Write a byte slice to the writer as a symbol.
 pub fn writeSymbol(self: *Writer, val: []const u8) !void {
     try self.writeDataInternal(val, tags.Symbol);
 }
@@ -130,49 +139,59 @@ fn writeDataInternal(self: *Writer, val: []const u8, sep: u8) !void {
     try self.io_writer.writeAll(val);
 }
 
-pub fn startSequence(self: *Writer) !void {
+/// Begin writing a Sequence of data. The Sequence will be populated with subsequent writes.
+/// Call `writeEndSequence` to finish the Sequence.
+pub fn writeStartSequence(self: *Writer) !void {
     self.sequence_depth += 1;
     try self.io_writer.writeByte(tags.StartSequence);
 }
 
-pub fn endSequence(self: *Writer) !void {
+/// Finish writing a Sequence. Throws `SequenceUnderflow` if we aren't in any sequences.
+/// Does not verify that the current depth is writing a sequence, vs a record, so it's possible to
+/// confuse it into writing invalid data.
+pub fn writeEndSequence(self: *Writer) !void {
     if (self.sequence_depth == 0) {
         return error.SequenceUnderflow;
     }
-
     self.sequence_depth -= 0;
     try self.io_writer.writeByte(tags.EndSequence);
 }
 
+/// Write a full Sequence of data given a list of `Generic`.
 pub fn writeSequence(self: *Writer, val: []const Generic) WritingError!void {
-    try self.startSequence();
+    try self.writeStartSequence();
     for (val) |gen| {
         try self.writeGeneric(&gen);
     }
-    try self.endSequence();
+    try self.writeEndSequence();
 }
 
-pub fn startRecord(self: *Writer, label: *const Generic) !void {
+/// Begin writing a Record of data given a label. The Record will be populated with subsequent writes.
+/// Call `writeEndRecord` to finish the Record.
+pub fn writeStartRecord(self: *Writer, label: *const Generic) !void {
     self.record_depth += 1;
     try self.io_writer.writeByte(tags.StartRecord);
     try self.writeGeneric(label);
 }
 
-pub fn endRecord(self: *Writer) !void {
+/// Finish writing a Record. Throws `RecordUnderflow` if we aren't in any records.
+/// Does not verify that the current depth is writing a record, vs a sequence, so it's possible to
+/// confuse it into writing invalid data.
+pub fn writeEndRecord(self: *Writer) !void {
     if (self.record_depth == 0) {
         return error.RecordUnderflow;
     }
-
     self.record_depth -= 0;
     try self.io_writer.writeByte(tags.EndRecord);
 }
 
+/// Write a full Record.
 pub fn writeRecord(self: *Writer, val: *const Record) WritingError!void {
-    try self.startRecord(val.label);
+    try self.writeStartRecord(val.label);
     for (val.fields) |field| {
         try self.writeGeneric(&field);
     }
-    try self.endRecord();
+    try self.writeEndRecord();
 }
 
 test "basic datatype" {
