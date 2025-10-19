@@ -26,19 +26,19 @@ pub fn write(self: Writer, val: anytype) !void {
 }
 
 pub fn writeGeneric(self: Writer, gen: Generic) !void {
-    return switch (gen) {
-        .bool => |val| try self.writeBoolean(val),
-        .float => |val| try self.writeFloat(val),
-        .double => |val| try self.writeDouble(val),
-        .data => |val| try self.writeData(val),
-        .string => |val| try self.writeString(val),
-        .symbol => |val| try self.writeSymbol(val),
+    return try switch (gen) {
+        .bool => |val| self.writeBoolean(val),
+        .float => |val| self.writeFloat(val),
+        .double => |val| self.writeDouble(val),
+        .data => |val| self.writeData(val),
+        .string => |val| self.writeString(val),
+        .symbol => |val| self.writeSymbol(val),
         .int => |int| switch (int) {
-            .i32 => |val| try self.writeInt(val),
-            .i64 => |val| try self.writeInt(val),
-            .i128 => |val| try self.writeInt(val),
+            .i32 => |val| self.writeInt(val),
+            .i64 => |val| self.writeInt(val),
+            .i128 => |val| self.writeInt(val),
         },
-        .sequence => |val| try self.writeSequence(val),
+        .sequence => |val| self.writeSequence(val),
     };
 }
 
@@ -159,7 +159,7 @@ test "symbol datatype" {
 test "sequence datatype" {
     const sequence = [_]Generic{
         .{ .string = "a test" }, .{ .int = .{ .i32 = 45 } }, .{ .symbol = "shark" }, .{
-            .sequence = &[_]Generic{
+            .sequence = &.{
                 .{ .int = .{ .i128 = -170_141_183_460_469_231_731_687_303_715_884_105_690 } },
                 .{ .string = "testing nesting" },
             },
