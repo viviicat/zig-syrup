@@ -35,8 +35,25 @@ pub fn write(self: *Writer, val: anytype) !void {
             .int => self.writeInt(val),
             .comptime_int => self.writeInt(val),
             // TODO: support sequence slices
-            .pointer => @compileError("use one of writeString, writeData, writeSymbol with a byte slice, or wrap it in a Generic to specify its type."),
-            else => @compileError("unsupported type!" ++ @typeName(ValType)),
+            .pointer => |ptr| switch (ptr.size) {
+                .slice => switch (ptr.child) {
+                    u8 => @compileError("use one of writeString, writeData, writeSymbol when writing bytes, or wrap it in a Generic to specify its type."),
+                    Generic => self.writeSequence(val),
+                },
+                .one => {
+                    const child_info = @typeInfo(ptr.child);
+                    return switch (child_info) {
+                        .array => switch (child_info.array.child) {
+                            u8 => @compileError("use one of writeString, writeData, writeSymbol when writing bytes, or wrap it in a Generic to specify its type."),
+                            Generic => self.writeSequence(val),
+                            else => @compileError("unsupported pointer type " ++ @typeName(ValType)),
+                        },
+                        else => @compileError("unsupported pointer type " ++ @typeName(ValType)),
+                    };
+                },
+                else => @compileError("unsupported pointer type " ++ @typeName(ValType)),
+            },
+            else => @compileError("unsupported type! " ++ @typeName(ValType)),
         },
     };
 }
@@ -225,7 +242,7 @@ test "sequence datatype" {
     var writer = Writer{ .io_writer = &output.writer };
     defer output.deinit();
 
-    try writer.writeSequence(&sequence);
+    try writer.write(&sequence);
     try std.testing.expectEqualStrings("[6\"a test45+5'shark[170141183460469231731687303715884105690-15\"testing nesting]]", output.written());
 }
 
