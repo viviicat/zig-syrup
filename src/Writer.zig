@@ -35,15 +35,13 @@ pub fn write(self: *Writer, val: anytype) !void {
         f32 => self.writeFloat(val),
         f64 => self.writeDouble(val),
         comptime_float => self.writeDouble(@as(f64, val)),
+        *const []Generic => self.writeSequence(val),
+        *const []u8 => @compileError("use one of writeString, writeData, writeSymbol when writing bytes, or wrap it in a Generic to specify its type."),
         else => switch (ValInfo) {
             .int => self.writeInt(val),
             .comptime_int => self.writeInt(val),
             // TODO: support sequence slices
             .pointer => |ptr| switch (ptr.size) {
-                .slice => switch (ptr.child) {
-                    u8 => @compileError("use one of writeString, writeData, writeSymbol when writing bytes, or wrap it in a Generic to specify its type."),
-                    Generic => self.writeSequence(val),
-                },
                 .one => {
                     const child_info = @typeInfo(ptr.child);
                     return switch (child_info) {
