@@ -211,7 +211,7 @@ pub fn next(self: *Scanner) NextError!Token {
                             if (self.remaining_bytes > remaining_buf_len) {
                                 if (self.is_end_of_input) return error.UnexpectedEndOfInput;
 
-                                self.cursor = self.input.len - 1;
+                                self.cursor = self.input.len;
                                 self.remaining_bytes -= remaining_buf_len;
                                 return switch (byte) {
                                     tags.Data => {
@@ -245,13 +245,15 @@ pub fn next(self: *Scanner) NextError!Token {
                 }
             },
             .float_continue, .double_continue => {
+                const remaining_buf_len = self.input.len - self.cursor;
+                if (remaining_buf_len <= 0) return error.BufferUnderrun;
+
                 const bits: usize = switch (state) {
                     .float_continue => 4,
                     .double_continue => 8,
                     else => unreachable,
                 };
 
-                const remaining_buf_len = self.input.len - self.cursor;
                 const remaining_in_float = bits - self.last_buf_float_data.len;
                 if (remaining_in_float > remaining_buf_len) {
                     if (self.is_end_of_input) return Error.UnexpectedEndOfInput;
@@ -275,10 +277,12 @@ pub fn next(self: *Scanner) NextError!Token {
             },
             .data_continue, .string_continue, .symbol_continue => {
                 const remaining_buf_len = self.input.len - self.cursor;
+                if (remaining_buf_len <= 0) return error.BufferUnderrun;
+
                 if (self.remaining_bytes > remaining_buf_len) {
                     if (self.is_end_of_input) return Error.UnexpectedEndOfInput;
 
-                    self.cursor = self.input.len - 1;
+                    self.cursor = self.input.len;
                     self.remaining_bytes -= remaining_buf_len;
                 } else {
                     self.cursor += self.remaining_bytes;
@@ -522,4 +526,16 @@ test "boundary double 2" {
     try std.testing.expectError(error.BufferUnderrun, scanner.next());
     scanner.feedInput(&[_]u8{ 64, 44, 204, 204, 204, 204, 204, 205 });
     try expectNext(&scanner, .{ .f64 = 14.4 });
+}
+
+test "boundary string" {
+    var scanner = Scanner.initStreaming(std.testing.allocator);
+    defer scanner.deinit();
+
+    scanner.feedInput("20\"hello this is");
+    try expectNext(&scanner, .{ .string = .{ .partial = "hello this is" } });
+    try std.testing.expectError(error.BufferUnderrun, scanner.next());
+
+    scanner.feedInput(" a test");
+    try expectNext(&scanner, .{ .string = .{ .partial = " a test" } });
 }
