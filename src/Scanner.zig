@@ -50,6 +50,8 @@ const State = enum {
     data_continue,
     string_continue,
     symbol_continue,
+    float_continue,
+    double_continue,
 };
 
 input: []const u8 = "",
@@ -59,6 +61,12 @@ state: State = .value,
 stack: std.BitStack,
 remaining_bytes: usize = 0,
 is_end_of_input: bool,
+
+/// Extra scratch space for floats that cross buffer boundaries
+float_scratch: [8]u8 = undefined,
+
+/// The float data from the last buffer, to combine with current float
+last_buf_float_data: []const u8 = &.{},
 
 const SEQUENCE_MODE = 0;
 const RECORD_MODE = 1;
@@ -106,60 +114,76 @@ pub fn next(self: *Scanner) NextError!Token {
     state_loop: while (true) {
         const state = self.state;
         switch (state) {
-            .value => switch (try self.expectByte()) {
-                tags.True => {
-                    self.cursor += 1;
-                    return .true;
-                },
-                tags.False => {
-                    self.cursor += 1;
-                    return .false;
-                },
-                tags.Float => {
-                    // FIXME: handle buffer barrier
-                    self.cursor += 1;
-                    self.value_start = self.cursor;
-                    self.cursor += 4;
-                    return .{ .f32 = parseFloatValue(f32, self.takeValueSlice()) };
-                },
-                tags.Double => {
-                    // FIXME: handle buffer barrier
-                    self.cursor += 1;
-                    self.value_start = self.cursor;
-                    self.cursor += 8;
-                    return .{ .f64 = parseFloatValue(f64, self.takeValueSlice()) };
-                },
-                tags.StartSequence => {
-                    try self.stack.push(SEQUENCE_MODE);
-                    self.cursor += 1;
-                    return .sequence_start;
-                },
-                tags.EndSequence => {
-                    if (self.stack.pop() != SEQUENCE_MODE) {
-                        return Error.SyntaxError;
-                    }
-                    self.cursor += 1;
-                    return .sequence_end;
-                },
-                tags.StartRecord => {
-                    try self.stack.push(RECORD_MODE);
-                    self.cursor += 1;
-                    return .record_start;
-                },
-                tags.EndRecord => {
-                    if (self.stack.pop() != RECORD_MODE) {
-                        return Error.SyntaxError;
-                    }
-                    self.cursor += 1;
-                    return .record_end;
-                },
-                '0'...'9' => {
-                    self.value_start = self.cursor;
-                    self.cursor += 1;
-                    self.state = .integer_or_length;
-                    continue :state_loop;
-                },
-                else => return Error.SyntaxError,
+            .value => {
+                const byte = try self.expectByte();
+                switch (try self.expectByte()) {
+                    tags.True => {
+                        self.cursor += 1;
+                        return .true;
+                    },
+                    tags.False => {
+                        self.cursor += 1;
+                        return .false;
+                    },
+                    tags.Float, tags.Double => {
+                        var bits: usize = 4;
+                        var cont_state = State.float_continue;
+                        if (byte == tags.Double) {
+                            bits = 8;
+                            cont_state = .double_continue;
+                        }
+
+                        self.cursor += 1;
+                        self.value_start = self.cursor;
+                        const remaining_len = self.input.len - self.cursor;
+                        if (remaining_len < bits) {
+                            if (self.is_end_of_input) return Error.UnexpectedEndOfInput;
+                            self.cursor += remaining_len;
+                            const slice = self.takeValueSlice();
+                            @memcpy(&self.float_scratch, slice);
+                            self.last_buf_float_data = self.float_scratch[0..slice.len];
+                            self.state = cont_state;
+                            return error.BufferUnderrun;
+                        }
+                        self.cursor += bits;
+                        if (byte == tags.Float) {
+                            return .{ .f32 = parseFloatValue(f32, self.takeValueSlice()) };
+                        } else {
+                            return .{ .f64 = parseFloatValue(f64, self.takeValueSlice()) };
+                        }
+                    },
+                    tags.StartSequence => {
+                        try self.stack.push(SEQUENCE_MODE);
+                        self.cursor += 1;
+                        return .sequence_start;
+                    },
+                    tags.EndSequence => {
+                        if (self.stack.pop() != SEQUENCE_MODE) {
+                            return Error.SyntaxError;
+                        }
+                        self.cursor += 1;
+                        return .sequence_end;
+                    },
+                    tags.StartRecord => {
+                        try self.stack.push(RECORD_MODE);
+                        self.cursor += 1;
+                        return .record_start;
+                    },
+                    tags.EndRecord => {
+                        if (self.stack.pop() != RECORD_MODE) {
+                            return Error.SyntaxError;
+                        }
+                        self.cursor += 1;
+                        return .record_end;
+                    },
+                    '0'...'9' => {
+                        self.value_start = self.cursor;
+                        self.cursor += 1;
+                        self.state = .integer_or_length;
+                        continue :state_loop;
+                    },
+                    else => return Error.SyntaxError,
+                }
             },
             .integer_or_length => {
                 while (self.cursor < self.input.len) : (self.cursor += 1) {
@@ -185,9 +209,7 @@ pub fn next(self: *Scanner) NextError!Token {
                             self.remaining_bytes = try std.fmt.parseInt(usize, len_str, 10);
                             const remaining_buf_len = self.input.len - self.cursor;
                             if (self.remaining_bytes > remaining_buf_len) {
-                                if (self.is_end_of_input) {
-                                    return error.UnexpectedEndOfInput;
-                                }
+                                if (self.is_end_of_input) return error.UnexpectedEndOfInput;
 
                                 self.cursor = self.input.len - 1;
                                 self.remaining_bytes -= remaining_buf_len;
@@ -222,12 +244,39 @@ pub fn next(self: *Scanner) NextError!Token {
                     }
                 }
             },
+            .float_continue, .double_continue => {
+                const bits: usize = switch (state) {
+                    .float_continue => 4,
+                    .double_continue => 8,
+                    else => unreachable,
+                };
+
+                const remaining_buf_len = self.input.len - self.cursor;
+                const remaining_in_float = bits - self.last_buf_float_data.len;
+                if (remaining_in_float > remaining_buf_len) {
+                    if (self.is_end_of_input) return Error.UnexpectedEndOfInput;
+                    self.cursor = self.input.len - 1;
+                    const slice = self.takeValueSlice();
+                    @memcpy(self.float_scratch[self.last_buf_float_data.len..], slice);
+                    self.last_buf_float_data = self.float_scratch[0 .. self.last_buf_float_data.len + slice.len];
+                    return error.BufferUnderrun;
+                }
+
+                self.cursor += bits;
+                const slice = self.takeValueSlice();
+                @memcpy(self.float_scratch[self.last_buf_float_data.len..], slice);
+                self.last_buf_float_data = self.float_scratch[0 .. self.last_buf_float_data.len + slice.len];
+                self.state = .value;
+                return switch (state) {
+                    .float_continue => Token{ .f32 = parseFloatValue(f32, self.last_buf_float_data) },
+                    .double_continue => Token{ .f64 = parseFloatValue(f64, self.last_buf_float_data) },
+                    else => unreachable,
+                };
+            },
             .data_continue, .string_continue, .symbol_continue => {
                 const remaining_buf_len = self.input.len - self.cursor;
                 if (self.remaining_bytes > remaining_buf_len) {
-                    if (self.is_end_of_input) {
-                        return Error.UnexpectedEndOfInput;
-                    }
+                    if (self.is_end_of_input) return Error.UnexpectedEndOfInput;
 
                     self.cursor = self.input.len - 1;
                     self.remaining_bytes -= remaining_buf_len;
