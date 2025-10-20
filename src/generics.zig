@@ -8,9 +8,10 @@ pub const Integral = union(enum) {
 };
 
 pub const Generic = union(enum) {
-    bool: bool,
-    float: f32,
-    double: f64,
+    true,
+    false,
+    f32: f32,
+    f64: f64,
     int: Integral,
     data: []const u8,
     string: []const u8,

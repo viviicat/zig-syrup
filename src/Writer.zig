@@ -63,9 +63,10 @@ pub fn write(self: *Writer, val: anytype) !void {
 /// Write a `Generic` to the writer.
 pub fn writeGeneric(self: *Writer, gen: *const Generic) !void {
     return try switch (gen.*) {
-        .bool => |val| self.writeBoolean(val),
-        .float => |val| self.writeFloat(val),
-        .double => |val| self.writeDouble(val),
+        .true => self.writeBoolean(true),
+        .false => self.writeBoolean(false),
+        .f32 => |val| self.writeFloat(val),
+        .f64 => |val| self.writeDouble(val),
         .data => |val| self.writeData(val),
         .string => |val| self.writeString(val),
         .symbol => |val| self.writeSymbol(val),
@@ -279,8 +280,8 @@ test "record datatype" {
             },
         },
         .fields = &[_]Generic{
-            .{ .bool = true },
-            .{ .bool = false },
+            .true,
+            .false,
             .{ .symbol = "dogs-and-cats" },
         },
     };
