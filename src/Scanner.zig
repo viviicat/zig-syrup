@@ -166,12 +166,16 @@ pub fn next(self: *Scanner) NextError!Token {
                         tags.PositiveInt => {
                             self.state = .value;
                             // FIXME: barrier!
-                            return Token{ .positive_integer = .{ .full = self.takeValueSlice() } };
+                            const val = self.takeValueSlice();
+                            self.cursor += 1;
+                            return Token{ .positive_integer = .{ .full = val } };
                         },
                         tags.NegativeInt => {
                             self.state = .value;
                             // FIXME: barrier!
-                            return Token{ .negative_integer = .{ .full = self.takeValueSlice() } };
+                            const val = self.takeValueSlice();
+                            self.cursor += 1;
+                            return Token{ .negative_integer = .{ .full = val } };
                         },
                         tags.Data, tags.String, tags.Symbol => {
                             const len_str = self.takeValueSlice();
