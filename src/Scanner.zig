@@ -91,6 +91,14 @@ fn expectByte(self: *const Scanner) !u8 {
     return error.BufferUnderrun;
 }
 
+pub fn parseFloatValue(T: anytype, slice: []const u8) T {
+    const bits = @typeInfo(T).float.bits;
+    const unsigned = @Type(.{
+        .int = .{ .signedness = .unsigned, .bits = bits },
+    });
+    return @bitCast(std.mem.bigToNative(unsigned, std.mem.bytesAsValue(unsigned, slice).*));
+}
+
 pub fn next(self: *Scanner) NextError!Token {
     state_loop: while (true) {
         const state = self.state;
@@ -109,14 +117,14 @@ pub fn next(self: *Scanner) NextError!Token {
                     self.cursor += 1;
                     self.value_start = self.cursor;
                     self.cursor += 4;
-                    return .{ .f32 = try std.fmt.parseFloat(f32, self.takeValueSlice()) };
+                    return .{ .f32 = parseFloatValue(f32, self.takeValueSlice()) };
                 },
                 tags.Double => {
                     // FIXME: handle buffer barrier
                     self.cursor += 1;
                     self.value_start = self.cursor;
                     self.cursor += 8;
-                    return .{ .f64 = try std.fmt.parseFloat(f64, self.takeValueSlice()) };
+                    return .{ .f64 = parseFloatValue(f64, self.takeValueSlice()) };
                 },
                 tags.StartSequence => {
                     try self.stack.push(SEQUENCE_MODE);
@@ -152,21 +160,23 @@ pub fn next(self: *Scanner) NextError!Token {
             },
             .integer_or_length => {
                 while (self.cursor < self.input.len) : (self.cursor += 1) {
-                    // FIXME: barrier!
                     const byte = try self.expectByte();
                     switch (byte) {
                         '0'...'9' => continue,
                         tags.PositiveInt => {
                             self.state = .value;
+                            // FIXME: barrier!
                             return Token{ .positive_integer = .{ .full = self.takeValueSlice() } };
                         },
                         tags.NegativeInt => {
                             self.state = .value;
+                            // FIXME: barrier!
                             return Token{ .negative_integer = .{ .full = self.takeValueSlice() } };
                         },
                         tags.Data, tags.String, tags.Symbol => {
                             const len_str = self.takeValueSlice();
                             self.cursor += 1;
+                            self.value_start = self.cursor;
                             self.remaining_bytes = try std.fmt.parseInt(usize, len_str, 10);
                             const remaining_buf_len = self.input.len - self.cursor;
                             if (self.remaining_bytes > remaining_buf_len) {
@@ -293,9 +303,83 @@ fn expectNext(scanner: *Scanner, expected_token: Token) !void {
     return expectEqualTokens(expected_token, try scanner.next());
 }
 
-test "scan primitives" {
+test "primitive datatypes" {
     var scanner = Scanner.initCompleteInput(std.testing.allocator, "f");
+    {
+        defer scanner.deinit();
+        try expectNext(&scanner, .false);
+    }
+
+    scanner = Scanner.initCompleteInput(std.testing.allocator, "t");
+    {
+        defer scanner.deinit();
+        try expectNext(&scanner, .true);
+    }
+
+    scanner = Scanner.initCompleteInput(std.testing.allocator, "502345+");
+    {
+        defer scanner.deinit();
+        try expectNext(&scanner, .{ .positive_integer = .{ .full = "502345" } });
+    }
+
+    scanner = Scanner.initCompleteInput(std.testing.allocator, "323-");
+    {
+        defer scanner.deinit();
+        try expectNext(&scanner, .{ .negative_integer = .{ .full = "323" } });
+    }
+}
+
+test "float datatypes" {
+    var scanner = Scanner.initCompleteInput(std.testing.allocator, &[_]u8{ 68, 64, 44, 204, 204, 204, 204, 204, 205 });
+    {
+        defer scanner.deinit();
+        try expectNext(&scanner, .{ .f64 = 14.4 });
+    }
+
+    scanner = Scanner.initCompleteInput(std.testing.allocator, &[_]u8{ 70, 66, 105, 117, 195 });
+    {
+        defer scanner.deinit();
+        try expectNext(&scanner, .{ .f32 = 58.365 });
+    }
+}
+
+test "string datatype" {
+    var scanner = Scanner.initCompleteInput(std.testing.allocator, "26\"i love you, christine 😍");
+    {
+        defer scanner.deinit();
+        try expectNext(&scanner, .{ .string = .{ .full = "i love you, christine 😍" } });
+    }
+
+    scanner = Scanner.initCompleteInput(std.testing.allocator, "6\"björn");
+    {
+        defer scanner.deinit();
+        try expectNext(&scanner, .{ .string = .{ .full = "björn" } });
+    }
+}
+
+test "data datatype" {
+    var scanner = Scanner.initCompleteInput(std.testing.allocator, &[_]u8{ 53, 58, 69, 68, 67, 66, 65 });
+    defer scanner.deinit();
+    try expectNext(&scanner, .{ .data = .{ .full = &[_]u8{ 69, 68, 67, 66, 65 } } });
+}
+
+test "symbol datatype" {
+    var scanner = Scanner.initCompleteInput(std.testing.allocator, "6'hämta");
+    defer scanner.deinit();
+    try expectNext(&scanner, .{ .symbol = .{ .full = "hämta" } });
+}
+
+test "sequence datatype" {
+    var scanner = Scanner.initCompleteInput(std.testing.allocator, "[6\"a test45+5'shark[170141183460469231731687303715884105690-15\"testing nesting]]");
     defer scanner.deinit();
 
-    try expectNext(&scanner, .false);
+    try expectNext(&scanner, .sequence_start);
+    try expectNext(&scanner, .{ .string = .{ .full = "a test" } });
+    try expectNext(&scanner, .{ .positive_integer = .{ .full = "45" } });
+    try expectNext(&scanner, .{ .symbol = .{ .full = "shark" } });
+    try expectNext(&scanner, .sequence_start);
+    try expectNext(&scanner, .{ .negative_integer = .{ .full = "170141183460469231731687303715884105690" } });
+    try expectNext(&scanner, .{ .string = .{ .full = "testing nesting" } });
+    try expectNext(&scanner, .sequence_end);
+    try expectNext(&scanner, .sequence_end);
 }
