@@ -346,16 +346,23 @@ pub fn isNextTokenAllocatable(self: *Scanner) !bool {
     }
 }
 
-pub fn allocNextIntoArrayList(self: *Scanner, value_list: *std.array_list.Managed(u8), when: AllocWhen) !?[]const u8 {
-    return self.allocNextIntoArrayListMax(value_list, when, default_max_value_len);
+pub fn nextAlloc(self: *Scanner, allocator: std.mem.Allocator, when: AllocWhen) !Token {
+    return self.nextAllocMax(allocator, when, default_max_value_len);
 }
 
-pub fn allocNextIntoArrayListMax(self: *Scanner, value_list: *std.array_list.Managed(u8), when: AllocWhen, max_value_len: usize) !?[]const u8 {
+pub fn nextAllocMax(self: *Scanner, allocator: std.mem.Allocator, when: AllocWhen, max_value_len: usize) !Token {
+    if (!self.isNextTokenAllocatable()) {
+        return self.next();
+    }
+
+    var value_list = std.array_list.Managed(u8).init(allocator);
+    errdefer value_list.deinit();
+
     while (true) {
         const token = try self.next();
         switch (token) {
-            .negative_integer,
             .positive_integer,
+            .negative_integer,
             .data,
             .string,
             .symbol,
@@ -365,10 +372,19 @@ pub fn allocNextIntoArrayListMax(self: *Scanner, value_list: *std.array_list.Man
                 },
                 .terminal => |slice| {
                     if (when == .if_needed and value_list.items.len == 0) {
-                        return slice;
+                        return token;
                     }
+
                     try appendSlice(value_list, slice, max_value_len);
-                    return null;
+                    const alloc_slice = try value_list.toOwnedSlice();
+                    return switch (token) {
+                        .positive_integer => Token{ .positive_integer = .{ .allocated = alloc_slice } },
+                        .negative_integer => Token{ .negative_integer = .{ .allocated = alloc_slice } },
+                        .data => Token{ .data = .{ .allocated = alloc_slice } },
+                        .string => Token{ .string = .{ .allocated = alloc_slice } },
+                        .symbol => Token{ .symbol = .{ .allocated = alloc_slice } },
+                        else => unreachable,
+                    };
                 },
                 .alloc => unreachable,
             },
@@ -626,4 +642,22 @@ test "boundary string" {
 
     scanner.feedInput(" a test");
     try expectNext(&scanner, .{ .string = .{ .terminal = " a test" } });
+}
+
+test "testing allocation of strings" {
+    var scanner = Scanner.initStreaming(std.testing.allocator);
+    defer scanner.deinit();
+
+    var list = std.array_list.Managed(u8).init(std.testing.allocator);
+    defer list.deinit();
+
+    scanner.feedInput("20\"hello this is");
+    try std.testing.expectError(error.BufferUnderrun, scanner.allocNext(std.testing.allocator, .if_needed));
+    scanner.feedInput(" a test of the");
+    try std.testing.expectError(error.BufferUnderrun, scanner.allocNext(std.testing_allocator, .if_needed));
+    scanner.feedInput(" buffering system!");
+    try std.testing.expectEqual(null, try scanner.allocNext(std.testing.allocator, .if_needed));
+    try expectEqualTokens(
+        .{ .string = .{ .alloc = "hello this is a test of the buffering system!" } },
+    );
 }
