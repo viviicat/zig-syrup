@@ -60,7 +60,7 @@ value_start: usize = undefined,
 state: State = .value,
 stack: std.BitStack,
 remaining_bytes: usize = 0,
-is_end_of_input: bool,
+is_end_of_input: bool = false,
 
 /// Extra scratch space for floats that cross buffer boundaries
 float_scratch: [8]u8 = undefined,
@@ -140,7 +140,7 @@ pub fn next(self: *Scanner) NextError!Token {
                             if (self.is_end_of_input) return Error.UnexpectedEndOfInput;
                             self.cursor += remaining_len;
                             const slice = self.takeValueSlice();
-                            @memcpy(&self.float_scratch, slice);
+                            @memcpy(self.float_scratch[0..slice.len], slice);
                             self.last_buf_float_data = self.float_scratch[0..slice.len];
                             self.state = cont_state;
                             return error.BufferUnderrun;
@@ -262,9 +262,9 @@ pub fn next(self: *Scanner) NextError!Token {
                     return error.BufferUnderrun;
                 }
 
-                self.cursor += bits;
+                self.cursor += remaining_in_float;
                 const slice = self.takeValueSlice();
-                @memcpy(self.float_scratch[self.last_buf_float_data.len..], slice);
+                @memcpy(self.float_scratch[self.last_buf_float_data.len..bits], slice);
                 self.last_buf_float_data = self.float_scratch[0 .. self.last_buf_float_data.len + slice.len];
                 self.state = .value;
                 return switch (state) {
@@ -317,6 +317,12 @@ pub fn initCompleteInput(allocator: std.mem.Allocator, complete_input: []const u
         .stack = std.BitStack.init(allocator),
         .input = complete_input,
         .is_end_of_input = true,
+    };
+}
+
+pub fn initStreaming(allocator: std.mem.Allocator) Scanner {
+    return .{
+        .stack = std.BitStack.init(allocator),
     };
 }
 
@@ -392,13 +398,13 @@ test "primitive datatypes" {
 }
 
 test "float datatypes" {
-    var scanner = Scanner.initCompleteInput(std.testing.allocator, &[_]u8{ 68, 64, 44, 204, 204, 204, 204, 204, 205 });
+    var scanner = Scanner.initCompleteInput(std.testing.allocator, &[_]u8{ 'D', 64, 44, 204, 204, 204, 204, 204, 205 });
     {
         defer scanner.deinit();
         try expectNext(&scanner, .{ .f64 = 14.4 });
     }
 
-    scanner = Scanner.initCompleteInput(std.testing.allocator, &[_]u8{ 70, 66, 105, 117, 195 });
+    scanner = Scanner.initCompleteInput(std.testing.allocator, &[_]u8{ 'F', 66, 105, 117, 195 });
     {
         defer scanner.deinit();
         try expectNext(&scanner, .{ .f32 = 58.365 });
@@ -420,7 +426,7 @@ test "string datatype" {
 }
 
 test "data datatype" {
-    var scanner = Scanner.initCompleteInput(std.testing.allocator, &[_]u8{ 53, 58, 69, 68, 67, 66, 65 });
+    var scanner = Scanner.initCompleteInput(std.testing.allocator, &[_]u8{ '5', ':', 69, 68, 67, 66, 65 });
     defer scanner.deinit();
     try expectNext(&scanner, .{ .data = .{ .full = &[_]u8{ 69, 68, 67, 66, 65 } } });
 }
@@ -489,4 +495,31 @@ test "incomplete string" {
     defer scanner.deinit();
 
     try std.testing.expectError(Error.UnexpectedEndOfInput, scanner.next());
+}
+
+test "boundary float" {
+    var scanner = Scanner.initStreaming(std.testing.allocator);
+    defer scanner.deinit();
+    scanner.feedInput(&[_]u8{ 'F', 66, 105 });
+    try std.testing.expectError(error.BufferUnderrun, scanner.next());
+    scanner.feedInput(&[_]u8{ 117, 195 });
+    try expectNext(&scanner, .{ .f32 = 58.365 });
+}
+
+test "boundary double" {
+    var scanner = Scanner.initStreaming(std.testing.allocator);
+    defer scanner.deinit();
+    scanner.feedInput(&[_]u8{ 'D', 64, 44, 204, 204 });
+    try std.testing.expectError(error.BufferUnderrun, scanner.next());
+    scanner.feedInput(&[_]u8{ 204, 204, 204, 205 });
+    try expectNext(&scanner, .{ .f64 = 14.4 });
+}
+
+test "boundary double 2" {
+    var scanner = Scanner.initStreaming(std.testing.allocator);
+    defer scanner.deinit();
+    scanner.feedInput(&[_]u8{'D'});
+    try std.testing.expectError(error.BufferUnderrun, scanner.next());
+    scanner.feedInput(&[_]u8{ 64, 44, 204, 204, 204, 204, 204, 205 });
+    try expectNext(&scanner, .{ .f64 = 14.4 });
 }
