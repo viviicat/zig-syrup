@@ -184,6 +184,10 @@ pub fn next(self: *Scanner) NextError!Token {
                             self.remaining_bytes = try std.fmt.parseInt(usize, len_str, 10);
                             const remaining_buf_len = self.input.len - self.cursor;
                             if (self.remaining_bytes > remaining_buf_len) {
+                                if (self.is_end_of_input) {
+                                    return error.UnexpectedEndOfInput;
+                                }
+
                                 self.cursor = self.input.len - 1;
                                 self.remaining_bytes -= remaining_buf_len;
                                 return switch (byte) {
@@ -220,6 +224,10 @@ pub fn next(self: *Scanner) NextError!Token {
             .data_continue, .string_continue, .symbol_continue => {
                 const remaining_buf_len = self.input.len - self.cursor;
                 if (self.remaining_bytes > remaining_buf_len) {
+                    if (self.is_end_of_input) {
+                        return Error.UnexpectedEndOfInput;
+                    }
+
                     self.cursor = self.input.len - 1;
                     self.remaining_bytes -= remaining_buf_len;
                 } else {
@@ -386,4 +394,49 @@ test "sequence datatype" {
     try expectNext(&scanner, .{ .string = .{ .full = "testing nesting" } });
     try expectNext(&scanner, .sequence_end);
     try expectNext(&scanner, .sequence_end);
+}
+
+test "record datatype" {
+    var scanner = Scanner.initCompleteInput(std.testing.allocator, "<[5\"hello2456+]tf13'dogs-and-cats>");
+    defer scanner.deinit();
+
+    try expectNext(&scanner, .record_start);
+    try expectNext(&scanner, .sequence_start);
+    try expectNext(&scanner, .{ .string = .{ .full = "hello" } });
+    try expectNext(&scanner, .{ .positive_integer = .{ .full = "2456" } });
+    try expectNext(&scanner, .sequence_end);
+    try expectNext(&scanner, .true);
+    try expectNext(&scanner, .false);
+    try expectNext(&scanner, .{ .symbol = .{ .full = "dogs-and-cats" } });
+    try expectNext(&scanner, .record_end);
+}
+
+test "malformed record" {
+    var scanner = Scanner.initCompleteInput(std.testing.allocator, "<[5\"hello2456+]]tf13'dogs-and-cats>");
+    defer scanner.deinit();
+
+    try expectNext(&scanner, .record_start);
+    try expectNext(&scanner, .sequence_start);
+    try expectNext(&scanner, .{ .string = .{ .full = "hello" } });
+    try expectNext(&scanner, .{ .positive_integer = .{ .full = "2456" } });
+    try expectNext(&scanner, .sequence_end);
+    try std.testing.expectError(Error.SyntaxError, scanner.next());
+}
+
+test "malformed record 2" {
+    var scanner = Scanner.initCompleteInput(std.testing.allocator, "<[5\"hello2456+>]tf13'dogs-and-cats>");
+    defer scanner.deinit();
+
+    try expectNext(&scanner, .record_start);
+    try expectNext(&scanner, .sequence_start);
+    try expectNext(&scanner, .{ .string = .{ .full = "hello" } });
+    try expectNext(&scanner, .{ .positive_integer = .{ .full = "2456" } });
+    try std.testing.expectError(Error.SyntaxError, scanner.next());
+}
+
+test "incomplete string" {
+    var scanner = Scanner.initCompleteInput(std.testing.allocator, "5000\"nasty");
+    defer scanner.deinit();
+
+    try std.testing.expectError(Error.UnexpectedEndOfInput, scanner.next());
 }
