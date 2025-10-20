@@ -168,14 +168,12 @@ pub fn next(self: *Scanner) NextError!Token {
                         '0'...'9' => continue,
                         tags.PositiveInt => {
                             self.state = .value;
-                            // FIXME: barrier!
                             const val = self.takeValueSlice();
                             self.cursor += 1;
                             return Token{ .positive_integer = .{ .full = val } };
                         },
                         tags.NegativeInt => {
                             self.state = .value;
-                            // FIXME: barrier!
                             const val = self.takeValueSlice();
                             self.cursor += 1;
                             return Token{ .negative_integer = .{ .full = val } };
