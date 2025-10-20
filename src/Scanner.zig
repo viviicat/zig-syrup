@@ -11,7 +11,10 @@ pub const Error = error{
     InvalidUtf8,
 };
 
-pub const NextError = std.Io.Reader.Error || Error || std.mem.Allocator.Error || error{ BufferUnderrun, InvalidCharacter, Overflow };
+pub const NextError = std.Io.Reader.Error ||
+    Error ||
+    std.mem.Allocator.Error ||
+    error{ BufferUnderrun, InvalidCharacter, Overflow };
 
 const BytesType = union(enum) {
     full: []const u8,
