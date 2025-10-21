@@ -38,6 +38,9 @@ const Token = union(enum) {
     record_start,
     record_end,
 
+    set_start,
+    set_end,
+
     true,
     false,
 
@@ -68,7 +71,7 @@ const CollectionMode = enum {
     sequence,
     record,
     set,
-    map,
+    dictionary,
 };
 
 reader: *std.Io.Reader,
@@ -95,7 +98,11 @@ fn refillBuffer(self: *Reader) !void {
 
     self.input = self.reader.peekGreedy(1) catch |err| switch (err) {
         error.ReadFailed => return error.ReadFailed,
-        error.EndOfStream => return self.endInput(),
+        error.EndOfStream => {
+            self.is_end_of_input = true;
+            self.input = "";
+            return {};
+        },
     };
     self.reader.toss(self.input.len);
 
@@ -106,10 +113,6 @@ fn refillBuffer(self: *Reader) !void {
 fn refillBufferExpectMore(self: *Reader, remaining: usize) !void {
     try self.refillBuffer();
     if (remaining > self.input.len and self.is_end_of_input) return Error.UnexpectedEndOfInput;
-}
-
-fn endInput(self: *Reader) void {
-    self.is_end_of_input = true;
 }
 
 fn takeValueSlice(self: *Reader) []const u8 {
@@ -208,6 +211,18 @@ pub fn next(self: *Reader) NextError!Token {
                         }
                         self.cursor += 1;
                         return .record_end;
+                    },
+                    tags.StartSet => {
+                        try self.stack.append(.set);
+                        self.cursor += 1;
+                        return .set_start;
+                    },
+                    tags.EndSet => {
+                        if (self.stack.pop() != .set) {
+                            return Error.SyntaxError;
+                        }
+                        self.cursor += 1;
+                        return .set_end;
                     },
                     '0'...'9' => {
                         self.value_start = self.cursor;
@@ -416,6 +431,8 @@ pub fn nextAllocMax(self: *Reader, allocator: Allocator, when: AllocWhen, max_va
             .sequence_end,
             .record_start,
             .record_end,
+            .set_start,
+            .set_end,
             .true,
             .false,
             .f32,
@@ -484,6 +501,8 @@ fn expectEqualTokens(expected_token: Token, actual_token: Token) !void {
         .sequence_end,
         .record_start,
         .record_end,
+        .set_start,
+        .set_end,
         .true,
         .false,
         .end_of_document,
@@ -603,6 +622,35 @@ test "record datatype" {
     try expectNext(&reader, .record_end);
 }
 
+test "set datatype" {
+    // Note that we do not validate set uniqueness - this would be difficult to do
+    // without allocations. Could store a stack of sets, but it would make more sense
+    // to validate when actually building structures instead of just returning tokens.
+    var io_reader = std.Io.Reader.fixed("#[5\"hello2456+]ft13'cats-and-dogs$");
+    var reader = Reader.init(std.testing.allocator, &io_reader);
+    defer reader.deinit();
+
+    try expectNext(&reader, .set_start);
+    try expectNext(&reader, .sequence_start);
+    try expectNext(&reader, .{ .string = .{ .terminal = "hello" } });
+    try expectNext(&reader, .{ .positive_integer = .{ .terminal = "2456" } });
+    try expectNext(&reader, .sequence_end);
+    try expectNext(&reader, .false);
+    try expectNext(&reader, .true);
+    try expectNext(&reader, .{ .symbol = .{ .terminal = "cats-and-dogs" } });
+    try expectNext(&reader, .set_end);
+}
+
+test "set missing end token" {
+    var io_reader = std.Io.Reader.fixed("#5\"hello");
+    var reader = Reader.init(std.testing.allocator, &io_reader);
+    defer reader.deinit();
+
+    try expectNext(&reader, .set_start);
+    try expectNext(&reader, .{ .string = .{ .terminal = "hello" } });
+    try std.testing.expectError(error.UnexpectedEndOfInput, reader.next());
+}
+
 test "malformed record" {
     var io_reader = std.Io.Reader.fixed("<[5\"hello2456+]]tf13'dogs-and-cats>");
     var reader = Reader.init(std.testing.allocator, &io_reader);
@@ -681,7 +729,7 @@ test "boundary string" {
     try expectNext(&reader, .{ .string = .{ .terminal = " a test" } });
 }
 
-test "testing allocation of strings" {
+test "allocation of strings" {
     var io_reader = std.testing.Reader.init(&read_buf, &.{
         .{ .buffer = "45\"hello this is" },
         .{ .buffer = " a test of the" },
