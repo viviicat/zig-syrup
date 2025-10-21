@@ -41,6 +41,9 @@ const Token = union(enum) {
     set_start,
     set_end,
 
+    dictionary_start,
+    dictionary_end,
+
     true,
     false,
 
@@ -223,6 +226,18 @@ pub fn next(self: *Reader) NextError!Token {
                         }
                         self.cursor += 1;
                         return .set_end;
+                    },
+                    tags.StartDictionary => {
+                        try self.stack.append(.dictionary);
+                        self.cursor += 1;
+                        return .dictionary_start;
+                    },
+                    tags.EndDictionary => {
+                        if (self.stack.pop() != .dictionary) {
+                            return Error.SyntaxError;
+                        }
+                        self.cursor += 1;
+                        return .dictionary_end;
                     },
                     '0'...'9' => {
                         self.value_start = self.cursor;
@@ -433,6 +448,8 @@ pub fn nextAllocMax(self: *Reader, allocator: Allocator, when: AllocWhen, max_va
             .record_end,
             .set_start,
             .set_end,
+            .dictionary_start,
+            .dictionary_end,
             .true,
             .false,
             .f32,
@@ -503,6 +520,8 @@ fn expectEqualTokens(expected_token: Token, actual_token: Token) !void {
         .record_end,
         .set_start,
         .set_end,
+        .dictionary_start,
+        .dictionary_end,
         .true,
         .false,
         .end_of_document,
@@ -649,6 +668,25 @@ test "set missing end token" {
     try expectNext(&reader, .set_start);
     try expectNext(&reader, .{ .string = .{ .terminal = "hello" } });
     try std.testing.expectError(error.UnexpectedEndOfInput, reader.next());
+}
+
+test "dictionary datatype" {
+    var io_reader = std.Io.Reader.fixed("{7'cabbage[22\"i love a good cabbage!3456-]5'shoes[22\"new shoes are the best23+]}");
+    var reader = Reader.init(std.testing.allocator, &io_reader);
+    defer reader.deinit();
+
+    try expectNext(&reader, .dictionary_start);
+    try expectNext(&reader, .{ .symbol = .{ .terminal = "cabbage" } });
+    try expectNext(&reader, .sequence_start);
+    try expectNext(&reader, .{ .string = .{ .terminal = "i love a good cabbage!" } });
+    try expectNext(&reader, .{ .negative_integer = .{ .terminal = "3456" } });
+    try expectNext(&reader, .sequence_end);
+    try expectNext(&reader, .{ .symbol = .{ .terminal = "shoes" } });
+    try expectNext(&reader, .sequence_start);
+    try expectNext(&reader, .{ .string = .{ .terminal = "new shoes are the best" } });
+    try expectNext(&reader, .{ .positive_integer = .{ .terminal = "23" } });
+    try expectNext(&reader, .sequence_end);
+    try expectNext(&reader, .dictionary_end);
 }
 
 test "malformed record" {
