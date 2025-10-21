@@ -1,9 +1,10 @@
-//! Low level Syrup parser, modeled after std.json.Scanner.
+//! Low level Syrup parser, modeled after std.json.Reader and std.json.Scanner
 const std = @import("std");
 const assert = std.debug.assert;
+const Allocator = std.mem.Allocator;
 const tags = @import("tags.zig");
 
-const Scanner = @This();
+const Reader = @This();
 
 pub const Error = error{
     SyntaxError,
@@ -18,8 +19,8 @@ pub const AllocWhen = enum {
 
 pub const NextError = std.Io.Reader.Error ||
     Error ||
-    std.mem.Allocator.Error ||
-    error{ BufferUnderrun, InvalidCharacter, Overflow };
+    Allocator.Error ||
+    error{ InvalidCharacter, Overflow };
 
 const BytesType = union(enum) {
     /// The bytes contain the end of the data.
@@ -62,6 +63,7 @@ const State = enum {
     double_continue,
 };
 
+reader: *std.Io.Reader,
 input: []const u8 = "",
 cursor: usize = 0,
 value_start: usize = undefined,
@@ -83,25 +85,35 @@ const record_mode = 1;
 /// This limit can be specified by using the Max versions of the alloc functions.
 pub const default_max_value_len = 4 * 1024 * 1024;
 
-pub fn feedInput(self: *Scanner, input: []const u8) void {
+fn refillBuffer(self: *Reader) !void {
     assert(self.cursor == self.input.len); // not done with last input slice.
 
-    self.input = input;
+    self.input = self.reader.peekGreedy(1) catch |err| switch (err) {
+        error.ReadFailed => return error.ReadFailed,
+        error.EndOfStream => return self.endInput(),
+    };
+    self.reader.toss(self.input.len);
+
     self.cursor = 0;
     self.value_start = 0;
 }
 
-pub fn endInput(self: *Scanner) void {
+fn refillBufferExpectMore(self: *Reader, remaining: usize) !void {
+    try self.refillBuffer();
+    if (remaining > self.input.len and self.is_end_of_input) return Error.UnexpectedEndOfInput;
+}
+
+fn endInput(self: *Reader) void {
     self.is_end_of_input = true;
 }
 
-fn takeValueSlice(self: *Scanner) []const u8 {
+fn takeValueSlice(self: *Reader) []const u8 {
     const slice = self.input[self.value_start..self.cursor];
     self.value_start = self.cursor;
     return slice;
 }
 
-fn takeValueString(self: *Scanner) ![]const u8 {
+fn takeValueString(self: *Reader) ![]const u8 {
     const slice = self.takeValueSlice();
     if (!std.unicode.utf8ValidateSlice(slice)) {
         return Error.InvalidUtf8;
@@ -109,13 +121,12 @@ fn takeValueString(self: *Scanner) ![]const u8 {
     return slice;
 }
 
-fn expectByte(self: *const Scanner) !u8 {
-    if (self.cursor < self.input.len) {
-        return self.input[self.cursor];
+fn expectByte(self: *Reader) !u8 {
+    if (self.cursor >= self.input.len) {
+        try self.refillBufferExpectMore(1);
     }
 
-    if (self.is_end_of_input) return error.UnexpectedEndOfInput;
-    return error.BufferUnderrun;
+    return self.input[self.cursor];
 }
 
 pub fn parseFloatValue(T: anytype, slice: []const u8) T {
@@ -126,7 +137,7 @@ pub fn parseFloatValue(T: anytype, slice: []const u8) T {
     return @bitCast(std.mem.bigToNative(unsigned, std.mem.bytesAsValue(unsigned, slice).*));
 }
 
-pub fn next(self: *Scanner) NextError!Token {
+pub fn next(self: *Reader) NextError!Token {
     state_loop: while (true) {
         const state = self.state;
         switch (state) {
@@ -159,7 +170,8 @@ pub fn next(self: *Scanner) NextError!Token {
                             @memcpy(self.float_scratch[0..slice.len], slice);
                             self.last_buf_float_data = self.float_scratch[0..slice.len];
                             self.state = cont_state;
-                            return error.BufferUnderrun;
+                            try self.refillBufferExpectMore(bits - remaining_len);
+                            continue :state_loop;
                         }
                         self.cursor += bits;
                         if (byte == tags.Float) {
@@ -261,23 +273,26 @@ pub fn next(self: *Scanner) NextError!Token {
                 }
             },
             .float_continue, .double_continue => {
-                const remaining_buf_len = self.input.len - self.cursor;
-                if (remaining_buf_len <= 0) return error.BufferUnderrun;
-
                 const bits: usize = switch (state) {
                     .float_continue => 4,
                     .double_continue => 8,
                     else => unreachable,
                 };
 
+                const remaining_buf_len = self.input.len - self.cursor;
+                if (remaining_buf_len == 0) {
+                    try self.refillBufferExpectMore(bits);
+                    continue :state_loop;
+                }
+
                 const remaining_in_float = bits - self.last_buf_float_data.len;
                 if (remaining_in_float > remaining_buf_len) {
-                    if (self.is_end_of_input) return Error.UnexpectedEndOfInput;
                     self.cursor = self.input.len - 1;
                     const slice = self.takeValueSlice();
                     @memcpy(self.float_scratch[self.last_buf_float_data.len..], slice);
                     self.last_buf_float_data = self.float_scratch[0 .. self.last_buf_float_data.len + slice.len];
-                    return error.BufferUnderrun;
+                    try self.refillBufferExpectMore(remaining_in_float - remaining_buf_len);
+                    continue :state_loop;
                 }
 
                 self.cursor += remaining_in_float;
@@ -293,7 +308,10 @@ pub fn next(self: *Scanner) NextError!Token {
             },
             .data_continue, .string_continue, .symbol_continue => {
                 const remaining_buf_len = self.input.len - self.cursor;
-                if (remaining_buf_len <= 0) return error.BufferUnderrun;
+                if (remaining_buf_len == 0) {
+                    try self.refillBufferExpectMore(self.remaining_bytes);
+                    continue :state_loop;
+                }
 
                 if (self.remaining_bytes > remaining_buf_len) {
                     if (self.is_end_of_input) return Error.UnexpectedEndOfInput;
@@ -330,28 +348,28 @@ fn appendSlice(list: *std.array_list.Managed(u8), buf: []const u8, max_value_len
     try list.appendSlice(buf);
 }
 
-pub fn isNextTokenAllocatable(self: *Scanner) !bool {
-    switch (self.state) {
+pub fn isNextTokenAllocatable(self: *Reader) !bool {
+    return switch (self.state) {
         .value => switch (try self.expectByte()) {
             '0'...'9' => true, // in value mode, the only allocatable items begin with a numeral.
             else => false,
-        }
-            .integer_or_length,
+        },
+        .integer_or_length,
         .data_continue,
         .string_continue,
         .symbol_continue,
         .float_continue,
         .double_continue,
         => false, // if we are already in the midst of getting a value, it's not allocatable.
-    }
+    };
 }
 
-pub fn nextAlloc(self: *Scanner, allocator: std.mem.Allocator, when: AllocWhen) !Token {
+pub fn nextAlloc(self: *Reader, allocator: Allocator, when: AllocWhen) !Token {
     return self.nextAllocMax(allocator, when, default_max_value_len);
 }
 
-pub fn nextAllocMax(self: *Scanner, allocator: std.mem.Allocator, when: AllocWhen, max_value_len: usize) !Token {
-    if (!self.isNextTokenAllocatable()) {
+pub fn nextAllocMax(self: *Reader, allocator: Allocator, when: AllocWhen, max_value_len: usize) !Token {
+    if (!try self.isNextTokenAllocatable()) {
         return self.next();
     }
 
@@ -368,14 +386,14 @@ pub fn nextAllocMax(self: *Scanner, allocator: std.mem.Allocator, when: AllocWhe
             .symbol,
             => |bytes_type| switch (bytes_type) {
                 .non_terminal => |slice| {
-                    try appendSlice(value_list, slice, max_value_len);
+                    try appendSlice(&value_list, slice, max_value_len);
                 },
                 .terminal => |slice| {
                     if (when == .if_needed and value_list.items.len == 0) {
                         return token;
                     }
 
-                    try appendSlice(value_list, slice, max_value_len);
+                    try appendSlice(&value_list, slice, max_value_len);
                     const alloc_slice = try value_list.toOwnedSlice();
                     return switch (token) {
                         .positive_integer => Token{ .positive_integer = .{ .allocated = alloc_slice } },
@@ -386,7 +404,7 @@ pub fn nextAllocMax(self: *Scanner, allocator: std.mem.Allocator, when: AllocWhe
                         else => unreachable,
                     };
                 },
-                .alloc => unreachable,
+                .allocated => unreachable,
             },
 
             .sequence_start,
@@ -403,21 +421,14 @@ pub fn nextAllocMax(self: *Scanner, allocator: std.mem.Allocator, when: AllocWhe
     }
 }
 
-pub fn initCompleteInput(allocator: std.mem.Allocator, complete_input: []const u8) Scanner {
+pub fn init(allocator: Allocator, reader: *std.Io.Reader) Reader {
     return .{
         .stack = std.BitStack.init(allocator),
-        .input = complete_input,
-        .is_end_of_input = true,
+        .reader = reader,
     };
 }
 
-pub fn initStreaming(allocator: std.mem.Allocator) Scanner {
-    return .{
-        .stack = std.BitStack.init(allocator),
-    };
-}
-
-pub fn deinit(self: *Scanner) void {
+pub fn deinit(self: *Reader) void {
     self.stack.deinit();
     self.* = undefined;
 }
@@ -475,189 +486,209 @@ fn expectEqualTokens(expected_token: Token, actual_token: Token) !void {
     }
 }
 
-fn expectNext(scanner: *Scanner, expected_token: Token) !void {
-    return expectEqualTokens(expected_token, try scanner.next());
+fn expectNext(self: *Reader, expected_token: Token) !void {
+    return expectEqualTokens(expected_token, try self.next());
 }
 
 test "primitive datatypes" {
-    var scanner = Scanner.initCompleteInput(std.testing.allocator, "f");
+    var io_reader = std.Io.Reader.fixed("f");
+    var reader = Reader.init(std.testing.allocator, &io_reader);
     {
-        defer scanner.deinit();
-        try expectNext(&scanner, .false);
+        defer reader.deinit();
+        try expectNext(&reader, .false);
     }
 
-    scanner = Scanner.initCompleteInput(std.testing.allocator, "t");
+    io_reader = std.Io.Reader.fixed("t");
+    reader = Reader.init(std.testing.allocator, &io_reader);
     {
-        defer scanner.deinit();
-        try expectNext(&scanner, .true);
+        defer reader.deinit();
+        try expectNext(&reader, .true);
     }
 
-    scanner = Scanner.initCompleteInput(std.testing.allocator, "502345+");
+    io_reader = std.Io.Reader.fixed("502345+");
+    reader = Reader.init(std.testing.allocator, &io_reader);
     {
-        defer scanner.deinit();
-        try expectNext(&scanner, .{ .positive_integer = .{ .terminal = "502345" } });
+        defer reader.deinit();
+        try expectNext(&reader, .{ .positive_integer = .{ .terminal = "502345" } });
     }
 
-    scanner = Scanner.initCompleteInput(std.testing.allocator, "323-");
+    io_reader = std.Io.Reader.fixed("323-");
+    reader = Reader.init(std.testing.allocator, &io_reader);
     {
-        defer scanner.deinit();
-        try expectNext(&scanner, .{ .negative_integer = .{ .terminal = "323" } });
+        defer reader.deinit();
+        try expectNext(&reader, .{ .negative_integer = .{ .terminal = "323" } });
     }
 }
 
 test "float datatypes" {
-    var scanner = Scanner.initCompleteInput(std.testing.allocator, &[_]u8{ 'D', 64, 44, 204, 204, 204, 204, 204, 205 });
+    var io_reader = std.Io.Reader.fixed(&[_]u8{ 'D', 64, 44, 204, 204, 204, 204, 204, 205 });
+    var reader = Reader.init(std.testing.allocator, &io_reader);
     {
-        defer scanner.deinit();
-        try expectNext(&scanner, .{ .f64 = 14.4 });
+        defer reader.deinit();
+        try expectNext(&reader, .{ .f64 = 14.4 });
     }
 
-    scanner = Scanner.initCompleteInput(std.testing.allocator, &[_]u8{ 'F', 66, 105, 117, 195 });
+    io_reader = std.Io.Reader.fixed(&[_]u8{ 'F', 66, 105, 117, 195 });
+    reader = Reader.init(std.testing.allocator, &io_reader);
     {
-        defer scanner.deinit();
-        try expectNext(&scanner, .{ .f32 = 58.365 });
+        defer reader.deinit();
+        try expectNext(&reader, .{ .f32 = 58.365 });
     }
 }
 
 test "string datatype" {
-    var scanner = Scanner.initCompleteInput(std.testing.allocator, "26\"i love you, christine 😍");
+    var io_reader = std.Io.Reader.fixed("26\"i love you, christine 😍");
+    var reader = Reader.init(std.testing.allocator, &io_reader);
     {
-        defer scanner.deinit();
-        try expectNext(&scanner, .{ .string = .{ .terminal = "i love you, christine 😍" } });
+        defer reader.deinit();
+        try expectNext(&reader, .{ .string = .{ .terminal = "i love you, christine 😍" } });
     }
 
-    scanner = Scanner.initCompleteInput(std.testing.allocator, "6\"björn");
+    io_reader = std.Io.Reader.fixed("6\"björn");
+    reader = Reader.init(std.testing.allocator, &io_reader);
     {
-        defer scanner.deinit();
-        try expectNext(&scanner, .{ .string = .{ .terminal = "björn" } });
+        defer reader.deinit();
+        try expectNext(&reader, .{ .string = .{ .terminal = "björn" } });
     }
 }
 
 test "data datatype" {
-    var scanner = Scanner.initCompleteInput(std.testing.allocator, &[_]u8{ '5', ':', 69, 68, 67, 66, 65 });
-    defer scanner.deinit();
-    try expectNext(&scanner, .{ .data = .{ .terminal = &[_]u8{ 69, 68, 67, 66, 65 } } });
+    var io_reader = std.Io.Reader.fixed(&[_]u8{ '5', ':', 69, 68, 67, 66, 65 });
+    var reader = Reader.init(std.testing.allocator, &io_reader);
+    defer reader.deinit();
+    try expectNext(&reader, .{ .data = .{ .terminal = &[_]u8{ 69, 68, 67, 66, 65 } } });
 }
 
 test "symbol datatype" {
-    var scanner = Scanner.initCompleteInput(std.testing.allocator, "6'hämta");
-    defer scanner.deinit();
-    try expectNext(&scanner, .{ .symbol = .{ .terminal = "hämta" } });
+    var io_reader = std.Io.Reader.fixed("6'hämta");
+    var reader = Reader.init(std.testing.allocator, &io_reader);
+    defer reader.deinit();
+    try expectNext(&reader, .{ .symbol = .{ .terminal = "hämta" } });
 }
 
 test "sequence datatype" {
-    var scanner = Scanner.initCompleteInput(std.testing.allocator, "[6\"a test45+5'shark[170141183460469231731687303715884105690-15\"testing nesting]]");
-    defer scanner.deinit();
+    var io_reader = std.Io.Reader.fixed("[6\"a test45+5'shark[170141183460469231731687303715884105690-15\"testing nesting]]");
+    var reader = Reader.init(std.testing.allocator, &io_reader);
+    defer reader.deinit();
 
-    try expectNext(&scanner, .sequence_start);
-    try expectNext(&scanner, .{ .string = .{ .terminal = "a test" } });
-    try expectNext(&scanner, .{ .positive_integer = .{ .terminal = "45" } });
-    try expectNext(&scanner, .{ .symbol = .{ .terminal = "shark" } });
-    try expectNext(&scanner, .sequence_start);
-    try expectNext(&scanner, .{ .negative_integer = .{ .terminal = "170141183460469231731687303715884105690" } });
-    try expectNext(&scanner, .{ .string = .{ .terminal = "testing nesting" } });
-    try expectNext(&scanner, .sequence_end);
-    try expectNext(&scanner, .sequence_end);
+    try expectNext(&reader, .sequence_start);
+    try expectNext(&reader, .{ .string = .{ .terminal = "a test" } });
+    try expectNext(&reader, .{ .positive_integer = .{ .terminal = "45" } });
+    try expectNext(&reader, .{ .symbol = .{ .terminal = "shark" } });
+    try expectNext(&reader, .sequence_start);
+    try expectNext(&reader, .{ .negative_integer = .{ .terminal = "170141183460469231731687303715884105690" } });
+    try expectNext(&reader, .{ .string = .{ .terminal = "testing nesting" } });
+    try expectNext(&reader, .sequence_end);
+    try expectNext(&reader, .sequence_end);
 }
 
 test "record datatype" {
-    var scanner = Scanner.initCompleteInput(std.testing.allocator, "<[5\"hello2456+]tf13'dogs-and-cats>");
-    defer scanner.deinit();
+    var io_reader = std.Io.Reader.fixed("<[5\"hello2456+]tf13'dogs-and-cats>");
+    var reader = Reader.init(std.testing.allocator, &io_reader);
+    defer reader.deinit();
 
-    try expectNext(&scanner, .record_start);
-    try expectNext(&scanner, .sequence_start);
-    try expectNext(&scanner, .{ .string = .{ .terminal = "hello" } });
-    try expectNext(&scanner, .{ .positive_integer = .{ .terminal = "2456" } });
-    try expectNext(&scanner, .sequence_end);
-    try expectNext(&scanner, .true);
-    try expectNext(&scanner, .false);
-    try expectNext(&scanner, .{ .symbol = .{ .terminal = "dogs-and-cats" } });
-    try expectNext(&scanner, .record_end);
+    try expectNext(&reader, .record_start);
+    try expectNext(&reader, .sequence_start);
+    try expectNext(&reader, .{ .string = .{ .terminal = "hello" } });
+    try expectNext(&reader, .{ .positive_integer = .{ .terminal = "2456" } });
+    try expectNext(&reader, .sequence_end);
+    try expectNext(&reader, .true);
+    try expectNext(&reader, .false);
+    try expectNext(&reader, .{ .symbol = .{ .terminal = "dogs-and-cats" } });
+    try expectNext(&reader, .record_end);
 }
 
 test "malformed record" {
-    var scanner = Scanner.initCompleteInput(std.testing.allocator, "<[5\"hello2456+]]tf13'dogs-and-cats>");
-    defer scanner.deinit();
+    var io_reader = std.Io.Reader.fixed("<[5\"hello2456+]]tf13'dogs-and-cats>");
+    var reader = Reader.init(std.testing.allocator, &io_reader);
+    defer reader.deinit();
 
-    try expectNext(&scanner, .record_start);
-    try expectNext(&scanner, .sequence_start);
-    try expectNext(&scanner, .{ .string = .{ .terminal = "hello" } });
-    try expectNext(&scanner, .{ .positive_integer = .{ .terminal = "2456" } });
-    try expectNext(&scanner, .sequence_end);
-    try std.testing.expectError(Error.SyntaxError, scanner.next());
+    try expectNext(&reader, .record_start);
+    try expectNext(&reader, .sequence_start);
+    try expectNext(&reader, .{ .string = .{ .terminal = "hello" } });
+    try expectNext(&reader, .{ .positive_integer = .{ .terminal = "2456" } });
+    try expectNext(&reader, .sequence_end);
+    try std.testing.expectError(Error.SyntaxError, reader.next());
 }
 
 test "malformed record 2" {
-    var scanner = Scanner.initCompleteInput(std.testing.allocator, "<[5\"hello2456+>]tf13'dogs-and-cats>");
-    defer scanner.deinit();
+    var io_reader = std.Io.Reader.fixed("<[5\"hello2456+>]tf13'dogs-and-cats>");
+    var reader = Reader.init(std.testing.allocator, &io_reader);
+    defer reader.deinit();
 
-    try expectNext(&scanner, .record_start);
-    try expectNext(&scanner, .sequence_start);
-    try expectNext(&scanner, .{ .string = .{ .terminal = "hello" } });
-    try expectNext(&scanner, .{ .positive_integer = .{ .terminal = "2456" } });
-    try std.testing.expectError(Error.SyntaxError, scanner.next());
+    try expectNext(&reader, .record_start);
+    try expectNext(&reader, .sequence_start);
+    try expectNext(&reader, .{ .string = .{ .terminal = "hello" } });
+    try expectNext(&reader, .{ .positive_integer = .{ .terminal = "2456" } });
+    try std.testing.expectError(Error.SyntaxError, reader.next());
 }
 
 test "incomplete string" {
-    var scanner = Scanner.initCompleteInput(std.testing.allocator, "5000\"nasty");
-    defer scanner.deinit();
+    var io_reader = std.Io.Reader.fixed("5000\"nasty");
+    var reader = Reader.init(std.testing.allocator, &io_reader);
+    defer reader.deinit();
 
-    try std.testing.expectError(Error.UnexpectedEndOfInput, scanner.next());
+    try expectNext(&reader, .{ .string = .{ .non_terminal = "nasty" } });
+    try std.testing.expectError(Error.UnexpectedEndOfInput, reader.next());
 }
 
+var read_buf: [256]u8 = undefined;
 test "boundary float" {
-    var scanner = Scanner.initStreaming(std.testing.allocator);
-    defer scanner.deinit();
-    scanner.feedInput(&[_]u8{ 'F', 66, 105 });
-    try std.testing.expectError(error.BufferUnderrun, scanner.next());
-    scanner.feedInput(&[_]u8{ 117, 195 });
-    try expectNext(&scanner, .{ .f32 = 58.365 });
+    var io_reader = std.testing.Reader.init(&read_buf, &.{
+        .{ .buffer = &.{ 'F', 66, 105 } },
+        .{ .buffer = &.{ 117, 195 } },
+    });
+    var reader = Reader.init(std.testing.allocator, &io_reader.interface);
+    defer reader.deinit();
+
+    try expectNext(&reader, .{ .f32 = 58.365 });
 }
 
 test "boundary double" {
-    var scanner = Scanner.initStreaming(std.testing.allocator);
-    defer scanner.deinit();
-    scanner.feedInput(&[_]u8{ 'D', 64, 44, 204, 204 });
-    try std.testing.expectError(error.BufferUnderrun, scanner.next());
-    scanner.feedInput(&[_]u8{ 204, 204, 204, 205 });
-    try expectNext(&scanner, .{ .f64 = 14.4 });
+    var io_reader = std.testing.Reader.init(&read_buf, &.{
+        .{ .buffer = &.{ 'D', 64, 44, 204, 204 } },
+        .{ .buffer = &.{ 204, 204, 204, 205 } },
+    });
+    var reader = Reader.init(std.testing.allocator, &io_reader.interface);
+    defer reader.deinit();
+    try expectNext(&reader, .{ .f64 = 14.4 });
 }
 
 test "boundary double 2" {
-    var scanner = Scanner.initStreaming(std.testing.allocator);
-    defer scanner.deinit();
-    scanner.feedInput(&[_]u8{'D'});
-    try std.testing.expectError(error.BufferUnderrun, scanner.next());
-    scanner.feedInput(&[_]u8{ 64, 44, 204, 204, 204, 204, 204, 205 });
-    try expectNext(&scanner, .{ .f64 = 14.4 });
+    var io_reader = std.testing.Reader.init(&read_buf, &.{
+        .{ .buffer = &.{'D'} },
+        .{ .buffer = &.{ 64, 44, 204, 204, 204, 204, 204, 205 } },
+    });
+    var reader = Reader.init(std.testing.allocator, &io_reader.interface);
+    defer reader.deinit();
+    try expectNext(&reader, .{ .f64 = 14.4 });
 }
 
 test "boundary string" {
-    var scanner = Scanner.initStreaming(std.testing.allocator);
-    defer scanner.deinit();
+    var io_reader = std.testing.Reader.init(&read_buf, &.{
+        .{ .buffer = "20\"hello this is" },
+        .{ .buffer = " a test" },
+    });
+    var reader = Reader.init(std.testing.allocator, &io_reader.interface);
+    defer reader.deinit();
 
-    scanner.feedInput("20\"hello this is");
-    try expectNext(&scanner, .{ .string = .{ .non_terminal = "hello this is" } });
-    try std.testing.expectError(error.BufferUnderrun, scanner.next());
-
-    scanner.feedInput(" a test");
-    try expectNext(&scanner, .{ .string = .{ .terminal = " a test" } });
+    try expectNext(&reader, .{ .string = .{ .non_terminal = "hello this is" } });
+    try expectNext(&reader, .{ .string = .{ .terminal = " a test" } });
 }
 
 test "testing allocation of strings" {
-    var scanner = Scanner.initStreaming(std.testing.allocator);
-    defer scanner.deinit();
+    var io_reader = std.testing.Reader.init(&read_buf, &.{
+        .{ .buffer = "45\"hello this is" },
+        .{ .buffer = " a test of the" },
+        .{ .buffer = " buffering system!" },
+    });
+    var reader = Reader.init(std.testing.allocator, &io_reader.interface);
+    defer reader.deinit();
 
-    var list = std.array_list.Managed(u8).init(std.testing.allocator);
-    defer list.deinit();
-
-    scanner.feedInput("20\"hello this is");
-    try std.testing.expectError(error.BufferUnderrun, scanner.allocNext(std.testing.allocator, .if_needed));
-    scanner.feedInput(" a test of the");
-    try std.testing.expectError(error.BufferUnderrun, scanner.allocNext(std.testing_allocator, .if_needed));
-    scanner.feedInput(" buffering system!");
-    try std.testing.expectEqual(null, try scanner.allocNext(std.testing.allocator, .if_needed));
+    const alloc = try reader.nextAlloc(std.testing.allocator, .if_needed);
+    defer std.testing.allocator.free(alloc.string.allocated);
     try expectEqualTokens(
-        .{ .string = .{ .alloc = "hello this is a test of the buffering system!" } },
+        .{ .string = .{ .allocated = "hello this is a test of the buffering system!" } },
+        alloc,
     );
 }
