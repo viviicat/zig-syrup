@@ -63,12 +63,20 @@ const State = enum {
     double_continue,
 };
 
+/// Enum corresponding to the currently parsed collection. The current collection is stored in a stack.
+const CollectionMode = enum {
+    sequence,
+    record,
+    set,
+    map,
+};
+
 reader: *std.Io.Reader,
 input: []const u8 = "",
 cursor: usize = 0,
 value_start: usize = undefined,
 state: State = .value,
-stack: std.BitStack,
+stack: std.array_list.Managed(CollectionMode),
 remaining_bytes: usize = 0,
 is_end_of_input: bool = false,
 
@@ -77,9 +85,6 @@ float_scratch: [8]u8 = undefined,
 
 /// The float data from the last buffer, to combine with current float
 last_buf_float_data: []const u8 = &.{},
-
-const sequence_mode = 0;
-const record_mode = 1;
 
 /// For security, the maximum size allocated to store a single string or number value is limited to 4MiB by default.
 /// This limit can be specified by using the Max versions of the alloc functions.
@@ -181,24 +186,24 @@ pub fn next(self: *Reader) NextError!Token {
                         }
                     },
                     tags.StartSequence => {
-                        try self.stack.push(sequence_mode);
+                        try self.stack.append(.sequence);
                         self.cursor += 1;
                         return .sequence_start;
                     },
                     tags.EndSequence => {
-                        if (self.stack.pop() != sequence_mode) {
+                        if (self.stack.pop() != .sequence) {
                             return Error.SyntaxError;
                         }
                         self.cursor += 1;
                         return .sequence_end;
                     },
                     tags.StartRecord => {
-                        try self.stack.push(record_mode);
+                        try self.stack.append(.record);
                         self.cursor += 1;
                         return .record_start;
                     },
                     tags.EndRecord => {
-                        if (self.stack.pop() != record_mode) {
+                        if (self.stack.pop() != .record) {
                             return Error.SyntaxError;
                         }
                         self.cursor += 1;
@@ -423,7 +428,7 @@ pub fn nextAllocMax(self: *Reader, allocator: Allocator, when: AllocWhen, max_va
 
 pub fn init(allocator: Allocator, reader: *std.Io.Reader) Reader {
     return .{
-        .stack = std.BitStack.init(allocator),
+        .stack = .init(allocator),
         .reader = reader,
     };
 }
