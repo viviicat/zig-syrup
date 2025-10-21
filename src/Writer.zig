@@ -40,7 +40,6 @@ pub fn write(self: *Writer, val: anytype) !void {
         else => switch (ValInfo) {
             .int => self.writeInt(val),
             .comptime_int => self.writeInt(val),
-            // TODO: support sequence slices
             .pointer => |ptr| switch (ptr.size) {
                 .one => {
                     const child_info = @typeInfo(ptr.child);
