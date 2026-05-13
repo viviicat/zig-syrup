@@ -42,4 +42,4 @@ See [The Syrup Specification](https://github.com/ocapn/syrup/blob/master/draft-s
 
 Dictionaries and sets must be unique *and must be sorted by key*, but keys are allowed to be any type. This results in an inefficiency when implementing a writer, as the writer must store previous keys in order to perform the sort. This means that allocation is needed, which we otherwise have been able to avoid in the writer.
 
-This will likely recall some sort of tree structure, though I need to think about it a bit more and remember what I was thinking when I was working on this last.
+This will likely require some sort of tree structure, though I need to think about it a bit more and remember what I was thinking when I was working on this last.
