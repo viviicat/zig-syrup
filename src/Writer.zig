@@ -69,7 +69,7 @@ gpa: std.mem.Allocator,
 tmp_writer: std.Io.Writer.Allocating,
 /// A stack that stores NestedDatas to keep track of what types of items we are inside, and data for some of these types.
 nested_datas: std.ArrayList(NestedData) = .empty,
-/// True if we are currently inside a set or dictionary
+/// The depth we are traversing inside a dictionary or set, so we know when we can flush the temp buffer.
 dict_or_set_depth: usize = 0,
 
 /// Initialize a `Writer`.
@@ -96,7 +96,7 @@ inline fn curWriter(self: *Writer) *std.Io.Writer {
     return if (self.dict_or_set_depth > 0) &self.tmp_writer.writer else self.underlying_writer;
 }
 
-/// Write a supported type to the writer.
+/// Write a supported type.
 pub fn write(self: *Writer, val: anytype) !void {
     const ValType = @TypeOf(val);
     const ValInfo = @typeInfo(ValType);
@@ -134,7 +134,7 @@ pub fn write(self: *Writer, val: anytype) !void {
     };
 }
 
-/// Write a `Generic` to the writer.
+/// Write a `Generic`.
 pub fn writeGeneric(self: *Writer, gen: *const Generic) !void {
     return try switch (gen.*) {
         .true => self.writeBoolean(true),
@@ -156,7 +156,7 @@ pub fn writeGeneric(self: *Writer, gen: *const Generic) !void {
     };
 }
 
-/// Write a boolean value to the writer.
+/// Write a boolean value.
 pub fn writeBoolean(self: *Writer, val: bool) !void {
     try self.startWrite();
     if (val) {
@@ -166,7 +166,7 @@ pub fn writeBoolean(self: *Writer, val: bool) !void {
     }
 }
 
-/// Write an integer value of any width to the writer.
+/// Write an integer value of any width.
 pub fn writeInt(self: *Writer, val: anytype) !void {
     const ValType = @TypeOf(val);
     const ValInfo = @typeInfo(ValType);
@@ -186,31 +186,31 @@ pub fn writeInt(self: *Writer, val: anytype) !void {
     }
 }
 
-/// Write a f32 float to the writer.
+/// Write a `f32` float.
 pub fn writeFloat(self: *Writer, val: f32) !void {
     try self.startWrite();
     try self.curWriter().writeByte(tags.Float);
     try self.curWriter().writeAll(&std.mem.toBytes(std.mem.nativeToBig(u32, @bitCast(val))));
 }
 
-/// Write a f64 float to the writer.
+/// Write a `f64` float.
 pub fn writeDouble(self: *Writer, val: f64) !void {
     try self.startWrite();
     try self.curWriter().writeByte(tags.Double);
     try self.curWriter().writeAll(&std.mem.toBytes(std.mem.nativeToBig(u64, @bitCast(val))));
 }
 
-/// Write a byte slice to the writer as data.
+/// Write a byte slice as data.
 pub fn writeData(self: *Writer, val: []const u8) !void {
     try self.writeDataInternal(val, tags.Data);
 }
 
-/// Write a byte slice to the writer as a string.
+/// Write a byte slice as a string.
 pub fn writeString(self: *Writer, val: []const u8) !void {
     try self.writeDataInternal(val, tags.String);
 }
 
-/// Write a byte slice to the writer as a symbol.
+/// Write a byte slice as a symbol.
 pub fn writeSymbol(self: *Writer, val: []const u8) !void {
     try self.writeDataInternal(val, tags.Symbol);
 }
@@ -222,7 +222,7 @@ fn writeDataInternal(self: *Writer, val: []const u8, sep: u8) !void {
     try self.curWriter().writeAll(val);
 }
 
-/// Begin writing a Sequence of data. The Sequence will be populated with subsequent writes.
+/// Begin writing a Sequence. The Sequence will be populated with subsequent writes.
 /// Call `writeEndSequence` to finish the Sequence.
 pub fn writeStartSequence(self: *Writer) !void {
     try self.startWrite();
@@ -244,7 +244,7 @@ pub fn writeEndSequence(self: *Writer) !void {
     try self.curWriter().writeByte(tags.EndSequence);
 }
 
-/// Write a full Sequence of data given a list of `Generic`.
+/// Write a full Sequence given a list of `Generic`.
 pub fn writeSequence(self: *Writer, val: []const Generic) WritingError!void {
     try self.writeStartSequence();
     for (val) |gen| {
@@ -253,7 +253,7 @@ pub fn writeSequence(self: *Writer, val: []const Generic) WritingError!void {
     try self.writeEndSequence();
 }
 
-/// Begin writing a Record of data given a label. The Record will be populated with subsequent writes.
+/// Begin writing a Record given a label. The Record will be populated with subsequent writes.
 /// Call `writeEndRecord` to finish the Record.
 pub fn writeStartRecord(self: *Writer, label: *const Generic) !void {
     try self.startWrite();
@@ -376,6 +376,7 @@ fn finalizeDictData(self: *Writer, dict_data: *DictData) !void {
     try self.maybeFlushBuffer();
 }
 
+/// Write a full Dictionary given a list of `Generic`.
 pub fn writeDictionary(self: *Writer, val: []const Generic) WritingError!void {
     try self.writeStartDictionary();
     for (val) |gen| {
@@ -416,6 +417,7 @@ fn writeEndSet(self: *Writer) !void {
     try self.curWriter().writeByte(tags.EndSet);
 }
 
+/// Write a full Set given a list of `Generic`.
 pub fn writeSet(self: *Writer, val: []const Generic) WritingError!void {
     try self.writeStartSet();
     for (val) |gen| {

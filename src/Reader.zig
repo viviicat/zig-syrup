@@ -29,25 +29,33 @@ pub const NextError = std.Io.Reader.Error ||
     error{ InvalidCharacter, Overflow };
 
 const BytesType = union(enum) {
-    /// The bytes contain the end of the data.
+    /// The bytes contain the full data, and are not separately allocated from the input buffer.
     terminal: []const u8,
-    /// The bytes do not contain the end of the data. At least one more BytesType will be returned with more data.
+    /// The bytes do not contain the end of the data. At least one more BytesType will be returned with more data. This field of the union is only returned if you are using the non-allocating `next`.
     non_terminal: []const u8,
     /// Contains the full data, with the slice being allocated separately from the input buffer.
     allocated: []const u8,
 };
 
 const Token = union(enum) {
+    /// We are at the beginning of a sequence
     sequence_start,
+    /// We are at the end of a sequence
     sequence_end,
 
+    /// We are at the beginning of a record
     record_start,
+    /// We are at the end of a record
     record_end,
 
+    /// We are at the beginning of a set
     set_start,
+    /// We are at the end of a set
     set_end,
 
+    /// We are at the beginning of a dictionary
     dictionary_start,
+    /// We are at the end of a dictionary
     dictionary_end,
 
     true,
@@ -56,12 +64,18 @@ const Token = union(enum) {
     f32: f32,
     f64: f64,
 
+    /// We parsed, and possibly allocated, a positive integer
     positive_integer: BytesType,
+    /// We parsed, and possibly allocated, a negative integer
     negative_integer: BytesType,
+    /// We parsed, and possibly allocated, data
     data: BytesType,
+    /// We parsed, and possibly allocated, a string
     string: BytesType,
+    /// We parsed, and possibly allocated, a symbol
     symbol: BytesType,
 
+    /// We have reached the end of the document
     end_of_document,
 };
 
@@ -94,7 +108,9 @@ value_start: usize = undefined,
 state: State = .value,
 /// Stack used to track the type of collection we're parsing.
 collection_stack: std.ArrayList(CollectionMode),
+/// Bytes remaining in the current value
 remaining_bytes: usize = 0,
+/// True if we've reached the end of the input.
 is_end_of_input: bool = false,
 
 /// Extra scratch space for floats that cross buffer boundaries
@@ -151,7 +167,7 @@ fn expectByte(self: *Reader) !u8 {
     return self.input[self.cursor];
 }
 
-pub fn parseFloatValue(T: anytype, slice: []const u8) T {
+fn parseFloatValue(T: anytype, slice: []const u8) T {
     const bits = @typeInfo(T).float.bits;
     const unsigned = @Type(.{
         .int = .{ .signedness = .unsigned, .bits = bits },
@@ -159,6 +175,7 @@ pub fn parseFloatValue(T: anytype, slice: []const u8) T {
     return @bitCast(std.mem.bigToNative(unsigned, std.mem.bytesAsValue(unsigned, slice).*));
 }
 
+/// Read the next token without allocating anything. Tokens may be non-terminal, and need to be read further.
 pub fn next(self: *Reader) NextError!Token {
     state_loop: while (true) {
         const state = self.state;
@@ -394,6 +411,7 @@ fn appendSlice(gpa: Allocator, list: *std.ArrayList(u8), buf: []const u8, max_va
     try list.appendSlice(gpa, buf);
 }
 
+/// Check if the next token is a type that can be allocated. This check is not necessary to run before `nextAlloc` or `nextAllocMax`.
 pub fn isNextTokenAllocatable(self: *Reader) !bool {
     return switch (self.state) {
         .value => switch (try self.expectByte()) {
@@ -410,12 +428,14 @@ pub fn isNextTokenAllocatable(self: *Reader) !bool {
     };
 }
 
-/// Perform an allocation for the next token with `default_max_value_len` as the max allocatable length.
+/// Read the next token, possibly performing allocations with `default_max_value_len` as the max allocatable length.
+/// `when` is used to detemine whether to always separately allocate collections.
 pub fn nextAlloc(self: *Reader, allocator: Allocator, when: AllocWhen) !Token {
     return self.nextAllocMax(allocator, when, default_max_value_len);
 }
 
-/// Perform an allocation for the next token with a given `max_value_len` for the longest allocatable length.
+/// Read the next token, possibly performing allocations with a given `max_value_len` for the longest allocatable length.
+/// `when` is used to detemine whether to always separately allocate collections.
 pub fn nextAllocMax(self: *Reader, allocator: Allocator, when: AllocWhen, max_value_len: usize) !Token {
     if (!try self.isNextTokenAllocatable()) {
         return self.next();
@@ -473,7 +493,6 @@ pub fn nextAllocMax(self: *Reader, allocator: Allocator, when: AllocWhen, max_va
     }
 }
 
-/// Initialize a new `Reader`.
 pub fn init(gpa: Allocator, reader: *std.Io.Reader) Reader {
     return .{
         .collection_stack = .empty,
