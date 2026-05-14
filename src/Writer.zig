@@ -19,13 +19,15 @@ pub const WriterError = error{
     DictionaryUnderflow,
     /// Tried to end a dictionary immediately after adding a key, without a corresponding value
     DictionaryMissingValue,
+    /// At least one duplicate entry was found in the dictionary or set.
+    DuplicateEntryFound,
     /// Tried to end a set but we are not inside any sets.
     SetUnderflow,
 };
 
 const WritingError = WriterError || std.Io.Writer.Error || std.mem.Allocator.Error;
 
-/// Structure to store the indices of the key and the value of a Dictionary
+/// Structure to store the indices for entries of a Dictionary or Set.
 const KeyValueIndices = struct {
     key: usize,
     value: usize = 0,
@@ -86,6 +88,11 @@ pub fn init(underlying_writer: *std.Io.Writer, gpa: std.mem.Allocator) Writer {
 /// Deinitialize a `Writer`.
 pub fn deinit(self: *Writer) void {
     self.tmp_writer.deinit();
+
+    for (self.nested_datas.items) |*item| {
+        item.deinit(self.gpa);
+    }
+
     self.nested_datas.deinit(self.gpa);
 }
 
@@ -288,14 +295,28 @@ fn writeStartDictionary(self: *Writer) !void {
     try self.nested_datas.append(self.gpa, .{ .dictionary = .{ .start_index = self.tmpWrittenLen() } });
 }
 
-fn cmpIndices(buf: []const u8, a: KeyValueIndices, b: KeyValueIndices) bool {
-    const a_slice = buf[a.key..a.value];
-    const b_slice = buf[b.key..b.value];
-    return std.mem.order(u8, a_slice, b_slice) == .lt;
+const CompData = struct {
+    buf: []const u8,
+    found_duplicates: bool = false,
+};
+
+fn cmpIndices(data: *CompData, a: KeyValueIndices, b: KeyValueIndices) bool {
+    const a_slice = data.buf[a.key..a.value];
+    const b_slice = data.buf[b.key..b.value];
+    const order = std.mem.order(u8, a_slice, b_slice);
+    if (order == .eq) {
+        data.found_duplicates = true;
+    }
+
+    return order == .lt;
 }
 
-fn sortIndices(self: *Writer, dict_data: *DictData) void {
-    std.mem.sort(KeyValueIndices, dict_data.indices.items, self.tmp_writer.written(), cmpIndices);
+fn sortIndices(self: *Writer, dict_data: *DictData) !void {
+    var comp_data = CompData{ .buf = self.tmp_writer.written() };
+    std.mem.sort(KeyValueIndices, dict_data.indices.items, &comp_data, cmpIndices);
+    if (comp_data.found_duplicates) {
+        return error.DuplicateEntryFound;
+    }
 }
 
 /// Finish writing a Dictionary. Throws `DictionaryUnderflow` if we aren't in any dictionaries.
@@ -328,7 +349,7 @@ fn writeEndDictionary(self: *Writer) !void {
 /// right position in the buffer.
 fn finalizeDictData(self: *Writer, dict_data: *DictData) !void {
     // Sort the indices by their buffer order!
-    self.sortIndices(dict_data);
+    try self.sortIndices(dict_data);
 
     // Ensure we can fit a copy of the data after the current data.
     const start_i = dict_data.start_index;
@@ -363,7 +384,7 @@ pub fn writeDictionary(self: *Writer, val: []const Generic) WritingError!void {
 }
 
 /// Begin writing a Set of data. `tmp_writer` will be filled with subsequent writes of
-/// keys, until the set is complete.
+/// entries, until the set is complete.
 /// Call `writeEndSet` to finish the Set.
 fn writeStartSet(self: *Writer) !void {
     try self.startWrite();
@@ -374,7 +395,7 @@ fn writeStartSet(self: *Writer) !void {
 
 /// Finish writing a Set. Throws `SetUnderflow` if we aren't in any sets.
 /// This sorts entries and then (unless we are still inside an outer Dictionary or Set) performs
-/// the actual flush of keys to the underlying writer, as previous calls will have
+/// the actual flush of items to the underlying writer, as previous calls will have
 /// only populated `tmp_writer` with items.
 fn writeEndSet(self: *Writer) !void {
     var nested_data = self.nested_datas.pop() orelse return error.SetUnderflow;
@@ -450,6 +471,7 @@ fn maybeFlushBuffer(self: *Writer) !void {
 /// For testing: Double check we cleared all nested datas.
 fn expectRootLevel(self: *Writer) !void {
     try std.testing.expectEqual(0, self.nested_datas.items.len);
+    try std.testing.expectEqual(0, self.dict_or_set_depth);
 }
 
 test "basic datatype" {
@@ -628,12 +650,83 @@ test "nested dictionary datatype" {
     try writer.expectRootLevel();
 }
 
-test "ensure dictionaries don't allow duplicate keys" {}
+test "ensure dictionaries don't allow duplicate keys" {
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    var writer = Writer.init(&output.writer, std.testing.allocator);
+    defer output.deinit();
+    defer writer.deinit();
+
+    // Same complex nested dictionary, but it has a problem, a duplicate key deep in the nesting.
+    const dict = Generic{
+        .dictionary = &[_]Generic{
+            .{ .dictionary = &[_]Generic{
+                .{ .dictionary = &[_]Generic{
+                    .{ .int = .{ .i32 = 99 } },
+                    .{ .int = .{ .i32 = 88888 } },
+                    .{ .int = .{ .i32 = 99 } },
+                    .{ .int = .{ .i32 = 99999 } },
+                } },
+                .{ .string = "hello world" },
+                .{ .dictionary = &[_]Generic{
+                    .{ .int = .{ .i32 = 33 } },
+                    .{ .int = .{ .i32 = 55555 } },
+                    .{ .int = .{ .i32 = 508 } },
+                    .{ .int = .{ .i32 = 44444 } },
+                } },
+                .{ .string = "values values values" },
+            } },
+            .{ .int = .{ .i32 = 45 } },
+            .{ .string = "key1" },
+            .{ .int = .{ .i32 = 42 } },
+            .{ .string = "key8" },
+            .{ .int = .{ .i32 = 2 } },
+            .{ .string = "key3" },
+            .{ .int = .{ .i32 = 4 } },
+        },
+    };
+
+    try std.testing.expectError(error.DuplicateEntryFound, writer.write(&dict));
+}
+
 test "ensure the user entered a value for every dictionary entry" {}
 
-test "simple set" {}
+test "simple set" {
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    var writer = Writer.init(&output.writer, std.testing.allocator);
+    defer output.deinit();
+    defer writer.deinit();
+
+    const set = Generic{
+        .set = &[_]Generic{
+            .{ .symbol = "one" },
+            .{ .symbol = "five" },
+            .{ .symbol = "two" },
+        },
+    };
+
+    try writer.write(&set);
+    try std.testing.expectEqualStrings("#3'one3'two4'five$", output.written());
+    try writer.expectRootLevel();
+}
+
 test "complex set" {}
-test "ensure sets don't allow duplicate entries" {}
+test "ensure sets don't allow duplicate entries" {
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    var writer = Writer.init(&output.writer, std.testing.allocator);
+    defer output.deinit();
+    defer writer.deinit();
+
+    const set = Generic{
+        .set = &[_]Generic{
+            .{ .symbol = "one" },
+            .{ .symbol = "five" },
+            .{ .symbol = "five" },
+            .{ .symbol = "two" },
+        },
+    };
+
+    try std.testing.expectError(error.DuplicateEntryFound, writer.write(&set));
+}
 
 test "mixing sets and dictionaries" {}
 
