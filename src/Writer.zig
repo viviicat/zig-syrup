@@ -2,7 +2,7 @@
 //! `std.Io.Writer`.
 
 const std = @import("std");
-const Generic = @import("generics.zig").Generic;
+const Value = @import("dynamic.zig").Value;
 const Record = @import("Record.zig");
 const tags = @import("tags.zig");
 const CollectionMode = @import("collections.zig").CollectionMode;
@@ -102,16 +102,16 @@ pub fn write(self: *Writer, val: anytype) !void {
     const ValInfo = @typeInfo(ValType);
 
     try switch (ValType) {
-        Generic => self.writeGeneric(val),
-        *const Generic => self.writeGeneric(val),
+        Value => self.writeValue(val),
+        *const Value => self.writeValue(val),
         Record => self.writeRecord(val),
         *const Record => self.writeRecord(val),
         bool => self.writeBoolean(val),
         f32 => self.writeFloat(val),
         f64 => self.writeDouble(val),
         comptime_float => self.writeDouble(@as(f64, val)),
-        *const []Generic => self.writeSequence(val),
-        *const []u8 => @compileError("use one of writeString, writeData, writeSymbol when writing bytes, or wrap it in a Generic to specify its type."),
+        *const []Value => self.writeSequence(val),
+        *const []u8 => @compileError("use one of writeString, writeData, writeSymbol when writing bytes, or wrap it in a Value to specify its type."),
         else => switch (ValInfo) {
             .int => self.writeInt(val),
             .comptime_int => self.writeInt(val),
@@ -120,8 +120,8 @@ pub fn write(self: *Writer, val: anytype) !void {
                     const child_info = @typeInfo(ptr.child);
                     return switch (child_info) {
                         .array => switch (child_info.array.child) {
-                            u8 => @compileError("use one of writeString, writeData, writeSymbol when writing bytes, or wrap it in a Generic to specify its type."),
-                            Generic => self.writeSequence(val),
+                            u8 => @compileError("use one of writeString, writeData, writeSymbol when writing bytes, or wrap it in a Value to specify its type."),
+                            Value => self.writeSequence(val),
                             else => @compileError("unsupported pointer type " ++ @typeName(ValType)),
                         },
                         else => @compileError("unsupported pointer type " ++ @typeName(ValType)),
@@ -134,8 +134,8 @@ pub fn write(self: *Writer, val: anytype) !void {
     };
 }
 
-/// Write a `Generic`.
-pub fn writeGeneric(self: *Writer, gen: *const Generic) !void {
+/// Write a `Value`.
+pub fn writeValue(self: *Writer, gen: *const Value) !void {
     return try switch (gen.*) {
         .true => self.writeBoolean(true),
         .false => self.writeBoolean(false),
@@ -244,22 +244,22 @@ pub fn writeSequenceEnd(self: *Writer) !void {
     try self.curWriter().writeByte(tags.EndSequence);
 }
 
-/// Write a full Sequence given a list of `Generic`.
-pub fn writeSequence(self: *Writer, val: []const Generic) WritingError!void {
+/// Write a full Sequence given a list of `Value`.
+pub fn writeSequence(self: *Writer, val: []const Value) WritingError!void {
     try self.writeSequenceStart();
     for (val) |gen| {
-        try self.writeGeneric(&gen);
+        try self.writeValue(&gen);
     }
     try self.writeSequenceEnd();
 }
 
 /// Begin writing a Record given a label. The Record will be populated with subsequent writes.
 /// Call `writeRecordEnd` to finish the Record.
-pub fn writeRecordStart(self: *Writer, label: *const Generic) !void {
+pub fn writeRecordStart(self: *Writer, label: *const Value) !void {
     try self.startWrite();
     try self.curWriter().writeByte(tags.StartRecord);
     try self.nested_datas.append(self.gpa, .record);
-    try self.writeGeneric(label);
+    try self.writeValue(label);
 }
 
 /// Finish writing a Record. Throws `RecordUnderflow` if we aren't in any records.
@@ -272,7 +272,7 @@ pub fn writeRecordEnd(self: *Writer) !void {
 pub fn writeRecord(self: *Writer, val: *const Record) WritingError!void {
     try self.writeRecordStart(val.label);
     for (val.fields) |field| {
-        try self.writeGeneric(&field);
+        try self.writeValue(&field);
     }
     try self.writeRecordEnd();
 }
@@ -376,11 +376,11 @@ fn finalizeDictData(self: *Writer, dict_data: *DictData) !void {
     try self.maybeFlushBuffer();
 }
 
-/// Write a full Dictionary given a list of `Generic`.
-pub fn writeDictionary(self: *Writer, val: []const Generic) WritingError!void {
+/// Write a full Dictionary given a list of `Value`.
+pub fn writeDictionary(self: *Writer, val: []const Value) WritingError!void {
     try self.writeDictionaryStart();
     for (val) |gen| {
-        try self.writeGeneric(&gen);
+        try self.writeValue(&gen);
     }
     try self.writeDictionaryEnd();
 }
@@ -417,11 +417,11 @@ fn writeSetEnd(self: *Writer) !void {
     try self.curWriter().writeByte(tags.EndSet);
 }
 
-/// Write a full Set given a list of `Generic`.
-pub fn writeSet(self: *Writer, val: []const Generic) WritingError!void {
+/// Write a full Set given a list of `Value`.
+pub fn writeSet(self: *Writer, val: []const Value) WritingError!void {
     try self.writeSetStart();
     for (val) |gen| {
-        try self.writeGeneric(&gen);
+        try self.writeValue(&gen);
     }
     try self.writeSetEnd();
 }
@@ -540,7 +540,7 @@ test "symbol datatype" {
 }
 
 test "sequence datatype" {
-    const sequence = [_]Generic{
+    const sequence = [_]Value{
         .{ .string = "a test" },
         .{ .int = .{ .i32 = 45 } },
         .{ .symbol = "shark" },
@@ -568,12 +568,12 @@ test "record datatype" {
 
     const record = Record{
         .label = &.{
-            .sequence = &[_]Generic{
+            .sequence = &[_]Value{
                 .{ .string = "hello" },
                 .{ .int = .{ .i32 = 2456 } },
             },
         },
-        .fields = &[_]Generic{
+        .fields = &[_]Value{
             .true,
             .false,
             .{ .symbol = "dogs-and-cats" },
@@ -591,8 +591,8 @@ test "simple dictionary datatype" {
     defer output.deinit();
     defer writer.deinit();
 
-    const dict = Generic{
-        .dictionary = &[_]Generic{
+    const dict = Value{
+        .dictionary = &[_]Value{
             .{ .string = "key2" },
             .{ .int = .{ .i32 = 45 } },
             .{ .string = "key1" },
@@ -619,17 +619,17 @@ test "nested dictionary datatype" {
     // Dictionary which has *nested* dictionaries as a key (gross, but allowed)
     // and a dictionary as a value for fun as well.
     // Let's hope this is not something someone would want to do, but at least it's possible.
-    const dict = Generic{
-        .dictionary = &[_]Generic{
-            .{ .dictionary = &[_]Generic{
-                .{ .dictionary = &[_]Generic{
+    const dict = Value{
+        .dictionary = &[_]Value{
+            .{ .dictionary = &[_]Value{
+                .{ .dictionary = &[_]Value{
                     .{ .int = .{ .i32 = 100 } },
                     .{ .int = .{ .i32 = 88888 } },
                     .{ .int = .{ .i32 = 99 } },
                     .{ .int = .{ .i32 = 99999 } },
                 } },
                 .{ .string = "hello world" },
-                .{ .dictionary = &[_]Generic{
+                .{ .dictionary = &[_]Value{
                     .{ .int = .{ .i32 = 33 } },
                     .{ .int = .{ .i32 = 55555 } },
                     .{ .int = .{ .i32 = 508 } },
@@ -660,17 +660,17 @@ test "ensure dictionaries don't allow duplicate keys" {
     defer writer.deinit();
 
     // Same complex nested dictionary, but it has a problem, a duplicate key deep in the nesting.
-    const dict = Generic{
-        .dictionary = &[_]Generic{
-            .{ .dictionary = &[_]Generic{
-                .{ .dictionary = &[_]Generic{
+    const dict = Value{
+        .dictionary = &[_]Value{
+            .{ .dictionary = &[_]Value{
+                .{ .dictionary = &[_]Value{
                     .{ .int = .{ .i32 = 99 } },
                     .{ .int = .{ .i32 = 88888 } },
                     .{ .int = .{ .i32 = 99 } },
                     .{ .int = .{ .i32 = 99999 } },
                 } },
                 .{ .string = "hello world" },
-                .{ .dictionary = &[_]Generic{
+                .{ .dictionary = &[_]Value{
                     .{ .int = .{ .i32 = 33 } },
                     .{ .int = .{ .i32 = 55555 } },
                     .{ .int = .{ .i32 = 508 } },
@@ -697,7 +697,7 @@ test "ensure the user entered a value for every dictionary entry" {
     defer output.deinit();
     defer writer.deinit();
 
-    const dict = Generic{ .dictionary = &[_]Generic{
+    const dict = Value{ .dictionary = &[_]Value{
         .{ .symbol = "one" },
         .{ .int = .{ .i32 = 45 } },
         .{ .symbol = "two" },
@@ -712,8 +712,8 @@ test "simple set" {
     defer output.deinit();
     defer writer.deinit();
 
-    const set = Generic{
-        .set = &[_]Generic{
+    const set = Value{
+        .set = &[_]Value{
             .{ .symbol = "one" },
             .{ .symbol = "five" },
             .{ .symbol = "two" },
@@ -731,7 +731,7 @@ test "same octets with shorter length come first" {
     defer output.deinit();
     defer writer.deinit();
 
-    const set = Generic{ .set = &[_]Generic{
+    const set = Value{ .set = &[_]Value{
         .{ .int = .{ .i32 = 234 } },
         .{ .int = .{ .i32 = 2342356 } },
     } };
@@ -748,16 +748,16 @@ test "complex set" {
     defer output.deinit();
     defer writer.deinit();
 
-    const set = Generic{
-        .set = &[_]Generic{
+    const set = Value{
+        .set = &[_]Value{
             .{ .symbol = "one" },
             .{ .int = .{ .i64 = 2342356 } },
-            .{ .dictionary = &[_]Generic{
+            .{ .dictionary = &[_]Value{
                 .{ .f64 = 67.98 },
                 .{ .f64 = 67.89 },
                 .{ .data = "boop" },
                 .{ .f64 = 99.999 },
-                .{ .set = &[_]Generic{
+                .{ .set = &[_]Value{
                     .{ .string = "hey" },
                     .{ .string = "there" },
                 } },
@@ -783,8 +783,8 @@ test "ensure sets don't allow duplicate entries" {
     defer output.deinit();
     defer writer.deinit();
 
-    const set = Generic{
-        .set = &[_]Generic{
+    const set = Value{
+        .set = &[_]Value{
             .{ .symbol = "one" },
             .{ .symbol = "five" },
             .{ .symbol = "five" },
@@ -810,13 +810,13 @@ test "detection of mismatched nesting levels" {
 test "The Grand Menagerie (ocapn spec test data)" {
     const zoo_bin = @embedFile("test-data/zoo.bin");
 
-    const menagerie = Generic{
+    const menagerie = Value{
         .record = .{
             .label = &.{ .data = "zoo" },
-            .fields = &[_]Generic{
+            .fields = &[_]Value{
                 .{ .string = "The Grand Menagerie" },
-                .{ .sequence = &[_]Generic{
-                    .{ .dictionary = &[_]Generic{
+                .{ .sequence = &[_]Value{
+                    .{ .dictionary = &[_]Value{
                         .{ .symbol = "species" },
                         .{ .data = "cat" },
                         .{ .symbol = "name" },
@@ -828,13 +828,13 @@ test "The Grand Menagerie (ocapn spec test data)" {
                         .{ .symbol = "alive?" },
                         .true,
                         .{ .symbol = "eats" },
-                        .{ .set = &[_]Generic{
+                        .{ .set = &[_]Value{
                             .{ .data = "mice" },
                             .{ .data = "fish" },
                             .{ .data = "kibble" },
                         } },
                     } },
-                    .{ .dictionary = &[_]Generic{
+                    .{ .dictionary = &[_]Value{
                         .{ .symbol = "species" },
                         .{ .data = "monkey" },
                         .{ .symbol = "name" },
@@ -846,12 +846,12 @@ test "The Grand Menagerie (ocapn spec test data)" {
                         .{ .symbol = "alive?" },
                         .false,
                         .{ .symbol = "eats" },
-                        .{ .set = &[_]Generic{
+                        .{ .set = &[_]Value{
                             .{ .data = "bananas" },
                             .{ .data = "insects" },
                         } },
                     } },
-                    .{ .dictionary = &[_]Generic{
+                    .{ .dictionary = &[_]Value{
                         .{ .symbol = "species" },
                         .{ .data = "ghost" },
                         .{ .symbol = "name" },
@@ -863,7 +863,7 @@ test "The Grand Menagerie (ocapn spec test data)" {
                         .{ .symbol = "alive?" },
                         .false,
                         .{ .symbol = "eats" },
-                        .{ .set = &[0]Generic{} },
+                        .{ .set = &[0]Value{} },
                     } },
                 } },
             },

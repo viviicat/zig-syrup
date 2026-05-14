@@ -9,18 +9,18 @@ pub const Integral = union(enum) {
 };
 
 /// A union which allows for encoding the nested Syrup structure. Contains all the possible Syrup types.
-/// Once created, it can be written via `Writer.write` or `Writer.writeGeneric`. For example:
+/// Once created, it can be written via `Writer.write` or `Writer.writeValue`. For example:
 /// ```zig
-/// const set = Generic{
-///     .set = &[_]Generic{
+/// const set = Value{
+///     .set = &[_]Value{
 ///         .{ .symbol = "one" },
 ///         .{ .int = .{ .i64 = 2342356 } },
-///         .{ .dictionary = &[_]Generic{
+///         .{ .dictionary = &[_]Value{
 ///             .{ .f64 = 67.98 },
 ///             .{ .f64 = 67.89 },
 ///             .{ .data = "boop" },
 ///             .{ .f64 = 99.999 },
-///             .{ .set = &[_]Generic{
+///             .{ .set = &[_]Value{
 ///                 .{ .string = "hey" },
 ///                 .{ .string = "there" },
 ///                 } },
@@ -29,7 +29,7 @@ pub const Integral = union(enum) {
 ///     },
 /// };
 /// ```
-pub const Generic = union(enum) {
+pub const Value = union(enum) {
     true,
     false,
     f32: f32,
@@ -38,8 +38,8 @@ pub const Generic = union(enum) {
     data: []const u8,
     string: []const u8,
     symbol: []const u8,
-    sequence: []const Generic,
+    sequence: []const Value,
     record: Record,
-    dictionary: []const Generic,
-    set: []const Generic,
+    dictionary: []const Value,
+    set: []const Value,
 };
