@@ -17,6 +17,8 @@ pub const WriterError = error{
     SequenceUnderflow,
     /// Tried to end a dictionary but we are not inside any dictionaries.
     DictionaryUnderflow,
+    /// Tried to end a dictionary immediately after adding a key, without a corresponding value
+    DictionaryMissingValue,
     /// Tried to end a set but we are not inside any sets.
     SetUnderflow,
 };
@@ -307,22 +309,35 @@ fn writeEndDictionary(self: *Writer) !void {
     }
     defer nested_data.deinit(self.gpa);
 
+    // Ensure that there are an even number of indices, otherwise we are missing the final value!
+    if (nested_data.dictionary.indices.items.len % 2 != 0) {
+        return error.DictionaryMissingValue;
+    }
+
     if (nested_data.dictionary.indices.items.len > 0) {
         var last = &nested_data.dictionary.indices.items[nested_data.dictionary.indices.items.len - 1];
         last.end = self.tmpWrittenLen();
     }
 
-    // We can now sort the indices by their buffer order!
-    self.sortIndices(&nested_data.dictionary);
+    try self.finalizeDictData(&nested_data.dictionary);
+
+    try self.curWriter().writeByte(tags.EndDictionary);
+}
+
+/// Given the dictionary data, finalize it by sorting by keys and putting the sorted bytes into the
+/// right position in the buffer.
+fn finalizeDictData(self: *Writer, dict_data: *DictData) !void {
+    // Sort the indices by their buffer order!
+    self.sortIndices(dict_data);
 
     // Ensure we can fit a copy of the data after the current data.
-    const start_i = nested_data.dictionary.start_index;
+    const start_i = dict_data.start_index;
     const end_i = self.tmpWrittenLen();
     const collection_len = end_i - start_i;
     try self.tmp_writer.ensureUnusedCapacity(collection_len);
 
     const tmp_buffer = self.tmp_writer.writer.buffer;
-    for (nested_data.dictionary.indices.items) |item| {
+    for (dict_data.indices.items) |item| {
         // Because we ensured capacity above, this will never realloc, so the buffer won't invalidate.
         // Ideally there'd be a way to write while ensuring no reallocs, but that's asking too much
         // of Allocating.Writer.
@@ -337,7 +352,6 @@ fn writeEndDictionary(self: *Writer) !void {
 
     self.dict_or_set_depth -= 1;
     try self.maybeFlushBuffer();
-    try self.curWriter().writeByte(tags.EndDictionary);
 }
 
 pub fn writeDictionary(self: *Writer, val: []const Generic) WritingError!void {
@@ -363,15 +377,20 @@ fn writeStartSet(self: *Writer) !void {
 /// the actual flush of keys to the underlying writer, as previous calls will have
 /// only populated `tmp_writer` with items.
 fn writeEndSet(self: *Writer) !void {
-    var nested_data = self.nested_datas.pop() orelse return error.DictionaryUnderflow;
-    if (@as(NestedType, nested_data) != .dictionary) {
-        return error.DictionaryUnderflow;
+    var nested_data = self.nested_datas.pop() orelse return error.SetUnderflow;
+    if (@as(NestedType, nested_data) != .set) {
+        return error.SetUnderflow;
+    }
+
+    if (nested_data.set.indices.items.len > 0) {
+        var last = &nested_data.set.indices.items[nested_data.set.indices.items.len - 1];
+        last.end = self.tmpWrittenLen();
+        last.value = last.end;
     }
 
     defer nested_data.deinit(self.gpa);
 
-    try self.maybeFlushBuffer();
-    self.dict_or_set_depth -= 1;
+    try self.finalizeDictData(&nested_data.set);
     try self.curWriter().writeByte(tags.EndSet);
 }
 
@@ -411,6 +430,7 @@ fn startWrite(self: *Writer) !void {
                 var cur = &dict_data.indices.items[dict_data.indices.items.len - 1];
                 // We write the end index of the current item, and then afterwards add.
                 cur.end = self.tmpWrittenLen();
+                cur.value = cur.end;
             }
 
             try dict_data.indices.append(self.gpa, .{ .key = self.tmpWrittenLen() });
@@ -609,9 +629,83 @@ test "nested dictionary datatype" {
 }
 
 test "ensure dictionaries don't allow duplicate keys" {}
+test "ensure the user entered a value for every dictionary entry" {}
 
 test "simple set" {}
 test "complex set" {}
 test "ensure sets don't allow duplicate entries" {}
 
 test "mixing sets and dictionaries" {}
+
+test "The Grand Menagerie (ocapn spec test data)" {
+    const zoo_bin = @embedFile("test-data/zoo.bin");
+
+    const menagerie = Generic{
+        .record = .{
+            .label = &.{ .data = "zoo" },
+            .fields = &[_]Generic{
+                .{ .string = "The Grand Menagerie" },
+                .{ .sequence = &[_]Generic{
+                    .{ .dictionary = &[_]Generic{
+                        .{ .symbol = "species" },
+                        .{ .data = "cat" },
+                        .{ .symbol = "name" },
+                        .{ .string = "Tabatha" },
+                        .{ .symbol = "age" },
+                        .{ .int = .{ .i32 = 12 } },
+                        .{ .symbol = "weight" },
+                        .{ .f64 = 8.2 },
+                        .{ .symbol = "alive?" },
+                        .true,
+                        .{ .symbol = "eats" },
+                        .{ .set = &[_]Generic{
+                            .{ .data = "mice" },
+                            .{ .data = "fish" },
+                            .{ .data = "kibble" },
+                        } },
+                    } },
+                    .{ .dictionary = &[_]Generic{
+                        .{ .symbol = "species" },
+                        .{ .data = "monkey" },
+                        .{ .symbol = "name" },
+                        .{ .string = "George" },
+                        .{ .symbol = "age" },
+                        .{ .int = .{ .i32 = 6 } },
+                        .{ .symbol = "weight" },
+                        .{ .f64 = 17.24 },
+                        .{ .symbol = "alive?" },
+                        .false,
+                        .{ .symbol = "eats" },
+                        .{ .set = &[_]Generic{
+                            .{ .data = "bananas" },
+                            .{ .data = "insects" },
+                        } },
+                    } },
+                    .{ .dictionary = &[_]Generic{
+                        .{ .symbol = "species" },
+                        .{ .data = "ghost" },
+                        .{ .symbol = "name" },
+                        .{ .string = "Casper" },
+                        .{ .symbol = "age" },
+                        .{ .int = .{ .i32 = -12 } },
+                        .{ .symbol = "weight" },
+                        .{ .f64 = -34.5 },
+                        .{ .symbol = "alive?" },
+                        .false,
+                        .{ .symbol = "eats" },
+                        .{ .set = &[0]Generic{} },
+                    } },
+                } },
+            },
+        },
+    };
+
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    var writer = Writer.init(&output.writer, std.testing.allocator);
+    defer output.deinit();
+    defer writer.deinit();
+
+    try writer.write(&menagerie);
+
+    try std.testing.expectEqualStrings(zoo_bin, output.written());
+}
