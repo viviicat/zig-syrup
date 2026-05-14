@@ -49,3 +49,27 @@ I'll probably add some build script for this, but for now, to browse documentati
 - [ ] **ZON to syrup conversion** - Zig's ZON format could possibly be converted to Syrup, if we so pleased.
 - [ ] **Serializing Zig structures** - Use comptime to convert Zig structs, slices, etc to Syrup format
 - [ ] **Fuzz testing** - Zig has fuzz testing support in the standard library we could play with.
+
+## Serializing Zig structure
+
+[Some insight here](https://ziglang.org/documentation/0.16.0/std/#std.json.Stringify.write)
+
+If we want to be able to convert raw Zig types effectively, we need a good way to hint to `writeString` when a bytearray is a string, symbol, or data. There's no obvious differentiation between these types, and we need to support them. Of course the C# way is to use attributes, but I don't think there's really an equivalent here.
+
+One option could be to use a DBus-style wire format. If we specified such a string with a standard name, it could be used as a way to differentiate. Default could be string as that's the common case, but if it needs to be something more clever, we just add the wire format.
+
+```zig
+// . = non-array, or string, s = symbol, d = data
+const Foo = struct {
+    const WireFormat = "..sd";
+
+    // A string
+    name: []const u8,
+    // just normal number
+    age: i64,
+    // A symbol
+    id: []const u8,
+    // A data
+    buffer: []const u8,
+};
+```
