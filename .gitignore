@@ -1,1 +1,5 @@
 .zig-cache/
+# for now we let user generate fresh docs.
+docs/
+libroot.a
+zig-out/
