@@ -570,18 +570,20 @@ test "nested dictionary datatype" {
 
     // Dictionary which has *nested* dictionaries as a key (gross, but allowed)
     // and a dictionary as a value for fun as well.
-    const dict = [_]Generic{
-        .{ .string = "key2" },
-        .{ .int = .{ .i32 = 45 } },
-        .{ .string = "key1" },
-        .{ .int = .{ .i32 = 42 } },
-        .{ .string = "key8" },
-        .{ .int = .{ .i32 = 2 } },
-        .{ .string = "key3" },
-        .{ .int = .{ .i32 = 4 } },
+    const dict = Generic{
+        .dictionary = &[_]Generic{
+            .{ .string = "key2" },
+            .{ .int = .{ .i32 = 45 } },
+            .{ .string = "key1" },
+            .{ .int = .{ .i32 = 42 } },
+            .{ .string = "key8" },
+            .{ .int = .{ .i32 = 2 } },
+            .{ .string = "key3" },
+            .{ .int = .{ .i32 = 4 } },
+        },
     };
 
-    try writer.writeDictionary(&dict);
+    try writer.write(&dict);
     try std.testing.expectEqualStrings("{4\"key142+4\"key245+4\"key34+4\"key82+}", output.written());
 
     try writer.expectRootLevel();
