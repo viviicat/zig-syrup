@@ -546,30 +546,6 @@ test "simple dictionary datatype" {
     defer output.deinit();
     defer writer.deinit();
 
-    const dict = [_]Generic{
-        .{ .string = "key2" },
-        .{ .int = .{ .i32 = 45 } },
-        .{ .string = "key1" },
-        .{ .int = .{ .i32 = 42 } },
-        .{ .string = "key8" },
-        .{ .int = .{ .i32 = 2 } },
-        .{ .string = "key3" },
-        .{ .int = .{ .i32 = 4 } },
-    };
-
-    try writer.writeDictionary(&dict);
-    try std.testing.expectEqualStrings("{4\"key142+4\"key245+4\"key34+4\"key82+}", output.written());
-    try writer.expectRootLevel();
-}
-
-test "nested dictionary datatype" {
-    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
-    var writer = Writer.init(&output.writer, std.testing.allocator);
-    defer output.deinit();
-    defer writer.deinit();
-
-    // Dictionary which has *nested* dictionaries as a key (gross, but allowed)
-    // and a dictionary as a value for fun as well.
     const dict = Generic{
         .dictionary = &[_]Generic{
             .{ .string = "key2" },
@@ -588,3 +564,54 @@ test "nested dictionary datatype" {
 
     try writer.expectRootLevel();
 }
+
+test "nested dictionary datatype" {
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    var writer = Writer.init(&output.writer, std.testing.allocator);
+    defer output.deinit();
+    defer writer.deinit();
+
+    // Dictionary which has *nested* dictionaries as a key (gross, but allowed)
+    // and a dictionary as a value for fun as well.
+    // Let's hope this is not something someone would want to do, but at least it's possible.
+    const dict = Generic{
+        .dictionary = &[_]Generic{
+            .{ .dictionary = &[_]Generic{
+                .{ .dictionary = &[_]Generic{
+                    .{ .int = .{ .i32 = 100 } },
+                    .{ .int = .{ .i32 = 99999 } },
+                    .{ .int = .{ .i32 = 99 } },
+                    .{ .int = .{ .i32 = 99999 } },
+                } },
+                .{ .string = "hello world" },
+                .{ .dictionary = &[_]Generic{
+                    .{ .int = .{ .i32 = 33 } },
+                    .{ .int = .{ .i32 = 99999 } },
+                    .{ .int = .{ .i32 = 508 } },
+                    .{ .int = .{ .i32 = 99999 } },
+                } },
+                .{ .string = "values values values" },
+            } },
+            .{ .int = .{ .i32 = 45 } },
+            .{ .string = "key1" },
+            .{ .int = .{ .i32 = 42 } },
+            .{ .string = "key8" },
+            .{ .int = .{ .i32 = 2 } },
+            .{ .string = "key3" },
+            .{ .int = .{ .i32 = 4 } },
+        },
+    };
+
+    try writer.write(&dict);
+    try std.testing.expectEqualStrings("{4\"key142+4\"key245+4\"key34+4\"key82+}", output.written());
+
+    try writer.expectRootLevel();
+}
+
+test "ensure dictionaries don't allow duplicate keys" {}
+
+test "simple set" {}
+test "complex set" {}
+test "ensure sets don't allow duplicate entries" {}
+
+test "mixing sets and dictionaries" {}
