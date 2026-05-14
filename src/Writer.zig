@@ -11,11 +11,13 @@ const print = std.debug.print;
 const Writer = @This();
 
 pub const WriterError = error{
-    /// Tried to end a record but we are not inside any records.
+    /// Tried to close the wrong type of nested item.
+    NestingMismatch,
+    /// Tried to end a record but we are not inside a record.
     RecordUnderflow,
-    /// Tried to end a sequence but we are not inside any sequences.
+    /// Tried to end a sequence but we are not inside a sequence.
     SequenceUnderflow,
-    /// Tried to end a dictionary but we are not inside any dictionaries.
+    /// Tried to end a dictionary but we are not inside a dictionary.
     DictionaryUnderflow,
     /// Tried to end a dictionary immediately after adding a key, without a corresponding value
     DictionaryMissingValue,
@@ -238,7 +240,7 @@ pub fn writeStartSequence(self: *Writer) !void {
 fn ensureProperNesting(self: *Writer, nested_type: NestedType, err: WriterError) !void {
     const data = self.nested_datas.pop() orelse return err;
     if (data != nested_type) {
-        return err;
+        return error.NestingMismatch;
     }
 }
 
@@ -324,19 +326,24 @@ fn sortIndices(self: *Writer, dict_data: *DictData) !void {
 /// the actual flush of keys and values to the underlying writer, as previous calls will have
 /// only populated `tmp_writer` with items.
 fn writeEndDictionary(self: *Writer) !void {
+    // TODO: should we repair the state if we throw a NestingMismatch, or do we accept that the Writer
+    // is now busted? For now, the writer state becomes jumbled.
+    // I am leaning towards not caring, because the streaming nature of this means that it would be hard
+    // for the user to keep track of what's been sent.
     var nested_data = self.nested_datas.pop() orelse return error.DictionaryUnderflow;
     if (@as(NestedType, nested_data) != .dictionary) {
-        return error.DictionaryUnderflow;
+        return error.NestingMismatch;
     }
     defer nested_data.deinit(self.gpa);
 
-    // Ensure that there are an even number of indices, otherwise we are missing the final value!
-    if (nested_data.dictionary.indices.items.len % 2 != 0) {
-        return error.DictionaryMissingValue;
-    }
-
     if (nested_data.dictionary.indices.items.len > 0) {
         var last = &nested_data.dictionary.indices.items[nested_data.dictionary.indices.items.len - 1];
+
+        // Ensure that we already wrote the last value
+        if (last.value == 0) {
+            return error.DictionaryMissingValue;
+        }
+
         last.end = self.tmpWrittenLen();
     }
 
@@ -400,7 +407,7 @@ fn writeStartSet(self: *Writer) !void {
 fn writeEndSet(self: *Writer) !void {
     var nested_data = self.nested_datas.pop() orelse return error.SetUnderflow;
     if (@as(NestedType, nested_data) != .set) {
-        return error.SetUnderflow;
+        return error.NestingMismatch;
     }
 
     if (nested_data.set.indices.items.len > 0) {
@@ -469,7 +476,7 @@ fn maybeFlushBuffer(self: *Writer) !void {
 }
 
 /// For testing: Double check we cleared all nested datas.
-fn expectRootLevel(self: *Writer) !void {
+fn expectCleanWriterState(self: *Writer) !void {
     try std.testing.expectEqual(0, self.nested_datas.items.len);
     try std.testing.expectEqual(0, self.dict_or_set_depth);
 }
@@ -486,7 +493,7 @@ test "basic datatype" {
     try writer.write(-42069);
 
     try std.testing.expectEqualStrings("ft502345+42069-", output.written());
-    try writer.expectRootLevel();
+    try writer.expectCleanWriterState();
 }
 
 test "float datatype" {
@@ -498,7 +505,7 @@ test "float datatype" {
     try writer.write(14.4);
     try writer.write(@as(f32, 58.365));
     try std.testing.expectEqualSlices(u8, &[_]u8{ 68, 64, 44, 204, 204, 204, 204, 204, 205, 70, 66, 105, 117, 195 }, output.written());
-    try writer.expectRootLevel();
+    try writer.expectCleanWriterState();
 }
 
 test "string datatype" {
@@ -511,7 +518,7 @@ test "string datatype" {
     try writer.writeString("björn");
 
     try std.testing.expectEqualStrings("26\"i love you, christine 😍6\"björn", output.written());
-    try writer.expectRootLevel();
+    try writer.expectCleanWriterState();
 }
 
 test "data datatype" {
@@ -522,7 +529,7 @@ test "data datatype" {
 
     try writer.writeData(&[_]u8{ 69, 68, 67, 66, 65 });
     try std.testing.expectEqualSlices(u8, &[_]u8{ 53, 58, 69, 68, 67, 66, 65 }, output.written());
-    try writer.expectRootLevel();
+    try writer.expectCleanWriterState();
 }
 
 test "symbol datatype" {
@@ -533,7 +540,7 @@ test "symbol datatype" {
 
     try writer.writeSymbol("hämta");
     try std.testing.expectEqualStrings("6'hämta", output.written());
-    try writer.expectRootLevel();
+    try writer.expectCleanWriterState();
 }
 
 test "sequence datatype" {
@@ -554,7 +561,7 @@ test "sequence datatype" {
 
     try writer.write(&sequence);
     try std.testing.expectEqualStrings("[6\"a test45+5'shark[170141183460469231731687303715884105690-15\"testing nesting]]", output.written());
-    try writer.expectRootLevel();
+    try writer.expectCleanWriterState();
 }
 
 test "record datatype" {
@@ -579,7 +586,7 @@ test "record datatype" {
 
     try writer.write(&record);
     try std.testing.expectEqualStrings("<[5\"hello2456+]tf13'dogs-and-cats>", output.written());
-    try writer.expectRootLevel();
+    try writer.expectCleanWriterState();
 }
 
 test "simple dictionary datatype" {
@@ -604,7 +611,7 @@ test "simple dictionary datatype" {
     try writer.write(&dict);
     try std.testing.expectEqualStrings("{4\"key142+4\"key245+4\"key34+4\"key82+}", output.written());
 
-    try writer.expectRootLevel();
+    try writer.expectCleanWriterState();
 }
 
 test "nested dictionary datatype" {
@@ -647,7 +654,7 @@ test "nested dictionary datatype" {
     try writer.write(&dict);
     try std.testing.expectEqualStrings("{4\"key142+4\"key34+4\"key82+{{100+88888+99+99999+}11\"hello world{33+55555+508+44444+}20\"values values values}45+}", output.written());
 
-    try writer.expectRootLevel();
+    try writer.expectCleanWriterState();
 }
 
 test "ensure dictionaries don't allow duplicate keys" {
@@ -688,7 +695,20 @@ test "ensure dictionaries don't allow duplicate keys" {
     try std.testing.expectError(error.DuplicateEntryFound, writer.write(&dict));
 }
 
-test "ensure the user entered a value for every dictionary entry" {}
+test "ensure the user entered a value for every dictionary entry" {
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    var writer = Writer.init(&output.writer, std.testing.allocator);
+    defer output.deinit();
+    defer writer.deinit();
+
+    const dict = Generic{ .dictionary = &[_]Generic{
+        .{ .symbol = "one" },
+        .{ .int = .{ .i32 = 45 } },
+        .{ .symbol = "two" },
+    } };
+
+    try std.testing.expectError(error.DictionaryMissingValue, writer.write(&dict));
+}
 
 test "simple set" {
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
@@ -706,10 +726,61 @@ test "simple set" {
 
     try writer.write(&set);
     try std.testing.expectEqualStrings("#3'one3'two4'five$", output.written());
-    try writer.expectRootLevel();
+    try writer.expectCleanWriterState();
 }
 
-test "complex set" {}
+test "same octets with shorter length come first" {
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    var writer = Writer.init(&output.writer, std.testing.allocator);
+    defer output.deinit();
+    defer writer.deinit();
+
+    const set = Generic{ .set = &[_]Generic{
+        .{ .int = .{ .i32 = 234 } },
+        .{ .int = .{ .i32 = 2342356 } },
+    } };
+
+    try writer.write(&set);
+    try std.testing.expectEqualStrings("#234+2342356+$", output.written());
+
+    try writer.expectCleanWriterState();
+}
+
+test "complex set" {
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    var writer = Writer.init(&output.writer, std.testing.allocator);
+    defer output.deinit();
+    defer writer.deinit();
+
+    const set = Generic{
+        .set = &[_]Generic{
+            .{ .symbol = "one" },
+            .{ .int = .{ .i64 = 2342356 } },
+            .{ .dictionary = &[_]Generic{
+                .{ .f64 = 67.98 },
+                .{ .f64 = 67.89 },
+                .{ .data = "boop" },
+                .{ .f64 = 99.999 },
+                .{ .set = &[_]Generic{
+                    .{ .string = "hey" },
+                    .{ .string = "there" },
+                } },
+                .{ .string = "stranger" },
+            } },
+        },
+    };
+
+    try writer.write(&set);
+    try std.testing.expectEqualStrings(
+        "#2342356+3'one{#3\"hey5\"there$8\"stranger4:boop" ++
+            "D" ++ .{ 64, 88, 255, 239, 157, 178, 45, 14 } ++
+            "D" ++ .{ 64, 80, 254, 184, 81, 235, 133, 31 } ++
+            "D" ++ .{ 64, 80, 248, 245, 194, 143, 92, 41 } ++ "}$",
+        output.written(),
+    );
+    try writer.expectCleanWriterState();
+}
+
 test "ensure sets don't allow duplicate entries" {
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
     var writer = Writer.init(&output.writer, std.testing.allocator);
@@ -728,7 +799,17 @@ test "ensure sets don't allow duplicate entries" {
     try std.testing.expectError(error.DuplicateEntryFound, writer.write(&set));
 }
 
-test "mixing sets and dictionaries" {}
+test "detection of mismatched nesting levels" {
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    var writer = Writer.init(&output.writer, std.testing.allocator);
+    defer output.deinit();
+    defer writer.deinit();
+
+    try writer.writeStartDictionary();
+    try writer.writeStartSet();
+
+    try std.testing.expectError(error.NestingMismatch, writer.writeEndDictionary());
+}
 
 test "The Grand Menagerie (ocapn spec test data)" {
     const zoo_bin = @embedFile("test-data/zoo.bin");
