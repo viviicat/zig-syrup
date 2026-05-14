@@ -223,8 +223,8 @@ fn writeDataInternal(self: *Writer, val: []const u8, sep: u8) !void {
 }
 
 /// Begin writing a Sequence. The Sequence will be populated with subsequent writes.
-/// Call `writeEndSequence` to finish the Sequence.
-pub fn writeStartSequence(self: *Writer) !void {
+/// Call `writeSequenceEnd` to finish the Sequence.
+pub fn writeSequenceStart(self: *Writer) !void {
     try self.startWrite();
     try self.curWriter().writeByte(tags.StartSequence);
     try self.nested_datas.append(self.gpa, .sequence);
@@ -239,23 +239,23 @@ fn ensureProperNesting(self: *Writer, mode: CollectionMode, err: WriterError) !v
 }
 
 /// Finish writing a Sequence. Throws `SequenceUnderflow` if we aren't in any sequences.
-pub fn writeEndSequence(self: *Writer) !void {
+pub fn writeSequenceEnd(self: *Writer) !void {
     try self.ensureProperNesting(.sequence, error.SequenceUnderflow);
     try self.curWriter().writeByte(tags.EndSequence);
 }
 
 /// Write a full Sequence given a list of `Generic`.
 pub fn writeSequence(self: *Writer, val: []const Generic) WritingError!void {
-    try self.writeStartSequence();
+    try self.writeSequenceStart();
     for (val) |gen| {
         try self.writeGeneric(&gen);
     }
-    try self.writeEndSequence();
+    try self.writeSequenceEnd();
 }
 
 /// Begin writing a Record given a label. The Record will be populated with subsequent writes.
-/// Call `writeEndRecord` to finish the Record.
-pub fn writeStartRecord(self: *Writer, label: *const Generic) !void {
+/// Call `writeRecordEnd` to finish the Record.
+pub fn writeRecordStart(self: *Writer, label: *const Generic) !void {
     try self.startWrite();
     try self.curWriter().writeByte(tags.StartRecord);
     try self.nested_datas.append(self.gpa, .record);
@@ -263,18 +263,18 @@ pub fn writeStartRecord(self: *Writer, label: *const Generic) !void {
 }
 
 /// Finish writing a Record. Throws `RecordUnderflow` if we aren't in any records.
-pub fn writeEndRecord(self: *Writer) !void {
+pub fn writeRecordEnd(self: *Writer) !void {
     try self.ensureProperNesting(.record, error.RecordUnderflow);
     try self.curWriter().writeByte(tags.EndRecord);
 }
 
 /// Write a full Record.
 pub fn writeRecord(self: *Writer, val: *const Record) WritingError!void {
-    try self.writeStartRecord(val.label);
+    try self.writeRecordStart(val.label);
     for (val.fields) |field| {
         try self.writeGeneric(&field);
     }
-    try self.writeEndRecord();
+    try self.writeRecordEnd();
 }
 
 fn tmpWrittenLen(self: *Writer) usize {
@@ -283,8 +283,8 @@ fn tmpWrittenLen(self: *Writer) usize {
 
 /// Begin writing a Dictionary of data. `tmp_writer` will be filled with subsequent writes of
 /// (alternately) keys and values, until the dictionary is complete.
-/// Call `writeEndDictionary` to finish the Dictionary.
-fn writeStartDictionary(self: *Writer) !void {
+/// Call `writeDictionaryEnd` to finish the Dictionary.
+fn writeDictionaryStart(self: *Writer) !void {
     try self.startWrite();
     try self.curWriter().writeByte(tags.StartDictionary);
     self.dict_or_set_depth += 1;
@@ -319,7 +319,7 @@ fn sortIndices(self: *Writer, dict_data: *DictData) !void {
 /// This sorts entries by key and then (unless we are still inside an outer Dictionary or Set) performs
 /// the actual flush of keys and values to the underlying writer, as previous calls will have
 /// only populated `tmp_writer` with items.
-fn writeEndDictionary(self: *Writer) !void {
+fn writeDictionaryEnd(self: *Writer) !void {
     // TODO: should we repair the state if we throw a NestingMismatch, or do we accept that the Writer
     // is now busted? For now, the writer state becomes jumbled.
     // I am leaning towards not caring, because the streaming nature of this means that it would be hard
@@ -378,17 +378,17 @@ fn finalizeDictData(self: *Writer, dict_data: *DictData) !void {
 
 /// Write a full Dictionary given a list of `Generic`.
 pub fn writeDictionary(self: *Writer, val: []const Generic) WritingError!void {
-    try self.writeStartDictionary();
+    try self.writeDictionaryStart();
     for (val) |gen| {
         try self.writeGeneric(&gen);
     }
-    try self.writeEndDictionary();
+    try self.writeDictionaryEnd();
 }
 
 /// Begin writing a Set of data. `tmp_writer` will be filled with subsequent writes of
 /// entries, until the set is complete.
-/// Call `writeEndSet` to finish the Set.
-fn writeStartSet(self: *Writer) !void {
+/// Call `writeSetEnd` to finish the Set.
+fn writeSetStart(self: *Writer) !void {
     try self.startWrite();
     try self.curWriter().writeByte(tags.StartSet);
     self.dict_or_set_depth += 1;
@@ -399,7 +399,7 @@ fn writeStartSet(self: *Writer) !void {
 /// This sorts entries and then (unless we are still inside an outer Dictionary or Set) performs
 /// the actual flush of items to the underlying writer, as previous calls will have
 /// only populated `tmp_writer` with items.
-fn writeEndSet(self: *Writer) !void {
+fn writeSetEnd(self: *Writer) !void {
     var nested_data = self.nested_datas.pop() orelse return error.SetUnderflow;
     if (nested_data != .set) {
         return error.NestingMismatch;
@@ -419,11 +419,11 @@ fn writeEndSet(self: *Writer) !void {
 
 /// Write a full Set given a list of `Generic`.
 pub fn writeSet(self: *Writer, val: []const Generic) WritingError!void {
-    try self.writeStartSet();
+    try self.writeSetStart();
     for (val) |gen| {
         try self.writeGeneric(&gen);
     }
-    try self.writeEndSet();
+    try self.writeSetEnd();
 }
 
 /// Start a write operation. We record index positions if we are in a Dictionary or Set.
@@ -801,10 +801,10 @@ test "detection of mismatched nesting levels" {
     defer output.deinit();
     defer writer.deinit();
 
-    try writer.writeStartDictionary();
-    try writer.writeStartSet();
+    try writer.writeDictionaryStart();
+    try writer.writeSetStart();
 
-    try std.testing.expectError(error.NestingMismatch, writer.writeEndDictionary());
+    try std.testing.expectError(error.NestingMismatch, writer.writeDictionaryEnd());
 }
 
 test "The Grand Menagerie (ocapn spec test data)" {
