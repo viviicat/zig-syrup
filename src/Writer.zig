@@ -335,8 +335,8 @@ fn writeEndDictionary(self: *Writer) !void {
     // Rewind the buffer now that we've copied back to the original position.
     self.tmp_writer.shrinkRetainingCapacity(end_i);
 
-    try self.maybeFlushBuffer();
     self.dict_or_set_depth -= 1;
+    try self.maybeFlushBuffer();
     try self.curWriter().writeByte(tags.EndDictionary);
 }
 
@@ -421,7 +421,7 @@ fn startWrite(self: *Writer) !void {
 
 /// If we are no longer inside any dictionaries or sets, flush the temp buffer to the Io.Writer and clear the buffer.
 fn maybeFlushBuffer(self: *Writer) !void {
-    if (self.tmpWrittenLen() > 0) {
+    if (self.dict_or_set_depth == 0) {
         try self.underlying_writer.writeAll(self.tmp_writer.written());
         self.tmp_writer.clearRetainingCapacity();
     }
@@ -579,16 +579,16 @@ test "nested dictionary datatype" {
             .{ .dictionary = &[_]Generic{
                 .{ .dictionary = &[_]Generic{
                     .{ .int = .{ .i32 = 100 } },
-                    .{ .int = .{ .i32 = 99999 } },
+                    .{ .int = .{ .i32 = 88888 } },
                     .{ .int = .{ .i32 = 99 } },
                     .{ .int = .{ .i32 = 99999 } },
                 } },
                 .{ .string = "hello world" },
                 .{ .dictionary = &[_]Generic{
                     .{ .int = .{ .i32 = 33 } },
-                    .{ .int = .{ .i32 = 99999 } },
+                    .{ .int = .{ .i32 = 55555 } },
                     .{ .int = .{ .i32 = 508 } },
-                    .{ .int = .{ .i32 = 99999 } },
+                    .{ .int = .{ .i32 = 44444 } },
                 } },
                 .{ .string = "values values values" },
             } },
@@ -603,7 +603,7 @@ test "nested dictionary datatype" {
     };
 
     try writer.write(&dict);
-    try std.testing.expectEqualStrings("{4\"key142+4\"key245+4\"key34+4\"key82+}", output.written());
+    try std.testing.expectEqualStrings("{4\"key142+4\"key34+4\"key82+{{100+88888+99+99999+}11\"hello world{33+55555+508+44444+}20\"values values values}45+}", output.written());
 
     try writer.expectRootLevel();
 }
