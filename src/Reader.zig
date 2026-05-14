@@ -3,6 +3,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const tags = @import("tags.zig");
+const CollectionMode = @import("collections.zig").CollectionMode;
 
 const Reader = @This();
 
@@ -69,15 +70,7 @@ const State = enum {
     double_continue,
 };
 
-/// Enum corresponding to the currently parsed collection. The current collection is stored in a stack.
-const CollectionMode = enum {
-    sequence,
-    record,
-    set,
-    dictionary,
-};
-
-reader: *std.Io.Reader,
+underlying_reader: *std.Io.Reader,
 input: []const u8 = "",
 cursor: usize = 0,
 value_start: usize = undefined,
@@ -99,7 +92,7 @@ pub const default_max_value_len = 4 * 1024 * 1024;
 fn refillBuffer(self: *Reader) !void {
     assert(self.cursor == self.input.len); // not done with last input slice.
 
-    self.input = self.reader.peekGreedy(1) catch |err| switch (err) {
+    self.input = self.underlying_reader.peekGreedy(1) catch |err| switch (err) {
         error.ReadFailed => return error.ReadFailed,
         error.EndOfStream => {
             self.is_end_of_input = true;
@@ -107,7 +100,7 @@ fn refillBuffer(self: *Reader) !void {
             return {};
         },
     };
-    self.reader.toss(self.input.len);
+    self.underlying_reader.toss(self.input.len);
 
     self.cursor = 0;
     self.value_start = 0;
@@ -463,7 +456,7 @@ pub fn nextAllocMax(self: *Reader, allocator: Allocator, when: AllocWhen, max_va
 pub fn init(allocator: Allocator, reader: *std.Io.Reader) Reader {
     return .{
         .stack = .init(allocator),
-        .reader = reader,
+        .underlying_reader = reader,
     };
 }
 

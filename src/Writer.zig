@@ -5,6 +5,7 @@ const std = @import("std");
 const Generic = @import("generics.zig").Generic;
 const Record = @import("Record.zig");
 const tags = @import("tags.zig");
+const CollectionMode = @import("collections.zig").CollectionMode;
 
 const print = std.debug.print;
 
@@ -46,14 +47,7 @@ const DictData = struct {
     }
 };
 
-const NestedType = enum {
-    sequence,
-    record,
-    dictionary,
-    set,
-};
-
-const NestedData = union(NestedType) {
+const NestedData = union(CollectionMode) {
     sequence: void,
     record: void,
     dictionary: DictData,
@@ -237,9 +231,9 @@ pub fn writeStartSequence(self: *Writer) !void {
 }
 
 /// Return the provided error if the expected nested item isn't the current parent.
-fn ensureProperNesting(self: *Writer, nested_type: NestedType, err: WriterError) !void {
+fn ensureProperNesting(self: *Writer, mode: CollectionMode, err: WriterError) !void {
     const data = self.nested_datas.pop() orelse return err;
-    if (data != nested_type) {
+    if (data != mode) {
         return error.NestingMismatch;
     }
 }
@@ -331,7 +325,7 @@ fn writeEndDictionary(self: *Writer) !void {
     // I am leaning towards not caring, because the streaming nature of this means that it would be hard
     // for the user to keep track of what's been sent.
     var nested_data = self.nested_datas.pop() orelse return error.DictionaryUnderflow;
-    if (@as(NestedType, nested_data) != .dictionary) {
+    if (nested_data != .dictionary) {
         return error.NestingMismatch;
     }
     defer nested_data.deinit(self.gpa);
@@ -406,7 +400,7 @@ fn writeStartSet(self: *Writer) !void {
 /// only populated `tmp_writer` with items.
 fn writeEndSet(self: *Writer) !void {
     var nested_data = self.nested_datas.pop() orelse return error.SetUnderflow;
-    if (@as(NestedType, nested_data) != .set) {
+    if (nested_data != .set) {
         return error.NestingMismatch;
     }
 
