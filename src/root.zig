@@ -2,7 +2,6 @@ const std = @import("std");
 
 const generics = @import("generics.zig");
 pub const Generic = generics.Generic;
-pub const Integral = generics.Integral;
 pub const Record = @import("Record.zig");
 pub const Writer = @import("Writer.zig");
 pub const Reader = @import("Reader.zig");

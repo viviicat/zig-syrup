@@ -1,4 +1,4 @@
-//! Low level Syrup parser, modeled after std.json.Reader and std.json.Scanner
+//! Low level Syrup parser, modeled after `std.json.Reader` and `std.json.Scanner`.
 const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
@@ -13,8 +13,13 @@ pub const Error = error{
     InvalidUtf8,
 };
 
+/// An enum used to specify whether to perform an allocation of a collection.
+/// If you do not need to store the item to use later, and only need to check
+/// its value immediately, you can try to avoid the work of allocating the memory.
 pub const AllocWhen = enum {
+    /// Only allocate if necessary because the collection is too long to fit in the input buffer.
     if_needed,
+    /// Always allocate the memory for the collection to a new location in memory.
     always,
 };
 
@@ -61,21 +66,34 @@ const Token = union(enum) {
 };
 
 const State = enum {
+    /// We are parsing a value
     value,
+    /// We are parsing what could be an integer, or a length specifier
     integer_or_length,
+    /// We are in the middle of parsing data, and need to continue after allocating
     data_continue,
+    /// We are in the middle of parsing a string, and need to continue after allocating
     string_continue,
+    /// We are in the middle of parsing a symbol, and need to continue after allocating
     symbol_continue,
+    /// We are in the middle of parsing a float, and need to continue after allocating
     float_continue,
+    /// We are in the middle of parsing a double, and need to continue after allocating
     double_continue,
 };
 
 underlying_reader: *std.Io.Reader,
+gpa: Allocator,
+/// The current input buffer provided by `underlying_reader`
 input: []const u8 = "",
+/// The position in the input buffer
 cursor: usize = 0,
+/// Position in the buffer where the current value begins
 value_start: usize = undefined,
+/// The current state of the parser
 state: State = .value,
-stack: std.array_list.Managed(CollectionMode),
+/// Stack used to track the type of collection we're parsing.
+collection_stack: std.ArrayList(CollectionMode),
 remaining_bytes: usize = 0,
 is_end_of_input: bool = false,
 
@@ -185,48 +203,48 @@ pub fn next(self: *Reader) NextError!Token {
                         }
                     },
                     tags.StartSequence => {
-                        try self.stack.append(.sequence);
+                        try self.collection_stack.append(self.gpa, .sequence);
                         self.cursor += 1;
                         return .sequence_start;
                     },
                     tags.EndSequence => {
-                        if (self.stack.pop() != .sequence) {
+                        if (self.collection_stack.pop() != .sequence) {
                             return Error.SyntaxError;
                         }
                         self.cursor += 1;
                         return .sequence_end;
                     },
                     tags.StartRecord => {
-                        try self.stack.append(.record);
+                        try self.collection_stack.append(self.gpa, .record);
                         self.cursor += 1;
                         return .record_start;
                     },
                     tags.EndRecord => {
-                        if (self.stack.pop() != .record) {
+                        if (self.collection_stack.pop() != .record) {
                             return Error.SyntaxError;
                         }
                         self.cursor += 1;
                         return .record_end;
                     },
                     tags.StartSet => {
-                        try self.stack.append(.set);
+                        try self.collection_stack.append(self.gpa, .set);
                         self.cursor += 1;
                         return .set_start;
                     },
                     tags.EndSet => {
-                        if (self.stack.pop() != .set) {
+                        if (self.collection_stack.pop() != .set) {
                             return Error.SyntaxError;
                         }
                         self.cursor += 1;
                         return .set_end;
                     },
                     tags.StartDictionary => {
-                        try self.stack.append(.dictionary);
+                        try self.collection_stack.append(self.gpa, .dictionary);
                         self.cursor += 1;
                         return .dictionary_start;
                     },
                     tags.EndDictionary => {
-                        if (self.stack.pop() != .dictionary) {
+                        if (self.collection_stack.pop() != .dictionary) {
                             return Error.SyntaxError;
                         }
                         self.cursor += 1;
@@ -370,10 +388,10 @@ pub fn next(self: *Reader) NextError!Token {
     }
 }
 
-fn appendSlice(list: *std.array_list.Managed(u8), buf: []const u8, max_value_len: usize) !void {
+fn appendSlice(gpa: Allocator, list: *std.ArrayList(u8), buf: []const u8, max_value_len: usize) !void {
     const new_len = std.math.add(usize, list.items.len, buf.len) catch return error.ValueTooLong;
     if (new_len > max_value_len) return error.ValueTooLong;
-    try list.appendSlice(buf);
+    try list.appendSlice(gpa, buf);
 }
 
 pub fn isNextTokenAllocatable(self: *Reader) !bool {
@@ -392,17 +410,19 @@ pub fn isNextTokenAllocatable(self: *Reader) !bool {
     };
 }
 
+/// Perform an allocation for the next token with `default_max_value_len` as the max allocatable length.
 pub fn nextAlloc(self: *Reader, allocator: Allocator, when: AllocWhen) !Token {
     return self.nextAllocMax(allocator, when, default_max_value_len);
 }
 
+/// Perform an allocation for the next token with a given `max_value_len` for the longest allocatable length.
 pub fn nextAllocMax(self: *Reader, allocator: Allocator, when: AllocWhen, max_value_len: usize) !Token {
     if (!try self.isNextTokenAllocatable()) {
         return self.next();
     }
 
-    var value_list = std.array_list.Managed(u8).init(allocator);
-    errdefer value_list.deinit();
+    var value_list = std.ArrayList(u8).empty;
+    errdefer value_list.deinit(allocator);
 
     while (true) {
         const token = try self.next();
@@ -414,15 +434,15 @@ pub fn nextAllocMax(self: *Reader, allocator: Allocator, when: AllocWhen, max_va
             .symbol,
             => |bytes_type| switch (bytes_type) {
                 .non_terminal => |slice| {
-                    try appendSlice(&value_list, slice, max_value_len);
+                    try appendSlice(self.gpa, &value_list, slice, max_value_len);
                 },
                 .terminal => |slice| {
                     if (when == .if_needed and value_list.items.len == 0) {
                         return token;
                     }
 
-                    try appendSlice(&value_list, slice, max_value_len);
-                    const alloc_slice = try value_list.toOwnedSlice();
+                    try appendSlice(self.gpa, &value_list, slice, max_value_len);
+                    const alloc_slice = try value_list.toOwnedSlice(self.gpa);
                     return switch (token) {
                         .positive_integer => Token{ .positive_integer = .{ .allocated = alloc_slice } },
                         .negative_integer => Token{ .negative_integer = .{ .allocated = alloc_slice } },
@@ -453,15 +473,17 @@ pub fn nextAllocMax(self: *Reader, allocator: Allocator, when: AllocWhen, max_va
     }
 }
 
-pub fn init(allocator: Allocator, reader: *std.Io.Reader) Reader {
+/// Initialize a new `Reader`.
+pub fn init(gpa: Allocator, reader: *std.Io.Reader) Reader {
     return .{
-        .stack = .init(allocator),
+        .collection_stack = .empty,
+        .gpa = gpa,
         .underlying_reader = reader,
     };
 }
 
 pub fn deinit(self: *Reader) void {
-    self.stack.deinit();
+    self.collection_stack.deinit(self.gpa);
     self.* = undefined;
 }
 
