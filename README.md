@@ -1,6 +1,6 @@
 This is a partially-implemented Zig Syrup implementation.
 
-This library has not been tidied up, documented, or checked for security issues. Use at your own risk
+This library still needs work, and hasn't been checked for security issues. Use at your own risk.
 
 See [The Syrup Specification](https://github.com/ocapn/syrup/blob/master/draft-specification.md) for details.
 
