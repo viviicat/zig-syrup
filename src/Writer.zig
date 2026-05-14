@@ -6,6 +6,8 @@ const Generic = @import("generics.zig").Generic;
 const Record = @import("Record.zig");
 const tags = @import("tags.zig");
 
+const print = std.debug.print;
+
 const Writer = @This();
 
 pub const WriterError = error{
@@ -19,37 +21,22 @@ pub const WriterError = error{
     SetUnderflow,
 };
 
-const WritingError = WriterError || std.Io.Writer.Error;
+const WritingError = WriterError || std.Io.Writer.Error || std.mem.Allocator.Error;
 
-/// A structure for storing index data for a key and a value in a Dictionary (or Set)
-const KeyValueData = struct {
-    /// The index in the temporary buffer of the key
-    key_index: usize,
-    /// The index in the temporary buffer of the value (unused for Sets)
-    value_index: usize = 0,
-    /// The length of all data for the entry including key and value.
-    len: usize = 0,
+/// Structure to store the indices of the key and the value of a Dictionary
+const KeyValueIndices = struct {
+    key: usize,
+    value: usize = 0,
+    end: usize = 0,
 };
 
 /// A structure for storing temporary data related to dictionary and set serialization.
 const DictData = struct {
-    const ItemType = enum {
-        key,
-        value,
-    };
+    start_index: usize,
+    indices: std.ArrayList(KeyValueIndices) = .empty,
 
-    key_values: std.ArrayList(KeyValueData) = .empty,
-    cur_type: ItemType = .key,
-
-    pub fn calculateLastLength(self: *DictData, buf_index: usize) void {
-        if (self.key_values.items.len > 0) {
-            var prev = &self.key_values.items[self.key_values.items.len - 1];
-            prev.len = buf_index - prev.key_index;
-        }
-    }
-
-    pub fn deinit(self: *DictData, gpa: std.Allocator) void {
-        self.key_values.deinit(gpa);
+    pub fn deinit(self: *DictData, gpa: std.mem.Allocator) void {
+        self.indices.deinit(gpa);
     }
 };
 
@@ -66,39 +53,42 @@ const NestedData = union(NestedType) {
     dictionary: DictData,
     set: DictData,
 
-    pub fn deinit(self: *NestedData) void {
-        switch (self) {
-            NestedType.dictionary, NestedType.set => |*value| value.deinit(),
+    pub fn deinit(self: *NestedData, gpa: std.mem.Allocator) void {
+        switch (self.*) {
+            .dictionary, .set => |*value| value.deinit(gpa),
             else => {},
         }
     }
 };
 
 /// The underlying `std.Io.Writer`.
-io_writer: *std.Io.Writer,
+underlying_writer: *std.Io.Writer,
 /// Allocator to use for the temporary memory
 gpa: std.mem.Allocator,
-/// A buffer used for serializing dictionaries and sets, which need to be sorted after serializing the keys and values.
-tmp_buf: std.ArrayList(u8) = .empty,
+/// A writer with an allocated buffer used for serializing dictionaries and sets, which need to be sorted after serializing the keys and values.
+tmp_writer: std.Io.Writer.Allocating,
 /// A stack that stores NestedDatas to keep track of what types of items we are inside, and data for some of these types.
 nested_datas: std.ArrayList(NestedData) = .empty,
 /// True if we are currently inside a set or dictionary
-inside_dict_or_set: bool = false,
+dict_or_set_depth: usize = 0,
 
-inline fn cur_writer(self: *Writer) *std.Io.Writer {
-    if (self.inside_dict_or_set) {
-        // noooo good
-        var writer = std.Io.Writer.Allocating.fromArrayList(self.gpa, &self.tmp_buf);
-        return writer.writer;
-    } else {
-        return self.io_writer;
-    }
+/// Initialize a `Writer`.
+pub fn init(underlying_writer: *std.Io.Writer, gpa: std.mem.Allocator) Writer {
+    return .{
+        .underlying_writer = underlying_writer,
+        .gpa = gpa,
+        .tmp_writer = std.Io.Writer.Allocating.init(gpa),
+    };
 }
 
-/// Deinitialize the `Writer`.
+/// Deinitialize a `Writer`.
 pub fn deinit(self: *Writer) void {
-    self.tmp_buf.deinit(self.gpa);
+    self.tmp_writer.deinit();
     self.nested_datas.deinit(self.gpa);
+}
+
+inline fn curWriter(self: *Writer) *std.Io.Writer {
+    return if (self.dict_or_set_depth > 0) &self.tmp_writer.writer else self.underlying_writer;
 }
 
 /// Write a supported type to the writer.
@@ -156,6 +146,8 @@ pub fn writeGeneric(self: *Writer, gen: *const Generic) !void {
         },
         .sequence => |val| self.writeSequence(val),
         .record => |val| self.writeRecord(&val),
+        .dictionary => |val| self.writeDictionary(val),
+        .set => |val| self.writeSet(val),
     };
 }
 
@@ -163,9 +155,9 @@ pub fn writeGeneric(self: *Writer, gen: *const Generic) !void {
 pub fn writeBoolean(self: *Writer, val: bool) !void {
     try self.startWrite();
     if (val) {
-        try self.cur_writer().writeByte(tags.True);
+        try self.curWriter().writeByte(tags.True);
     } else {
-        try self.cur_writer().writeByte(tags.False);
+        try self.curWriter().writeByte(tags.False);
     }
 }
 
@@ -181,26 +173,26 @@ pub fn writeInt(self: *Writer, val: anytype) !void {
 
     try self.startWrite();
     if (val >= 0) {
-        try self.cur_writer().printInt(val, 10, .lower, .{});
-        try self.cur_writer().writeByte(tags.PositiveInt);
+        try self.curWriter().printInt(val, 10, .lower, .{});
+        try self.curWriter().writeByte(tags.PositiveInt);
     } else {
-        try self.cur_writer().printInt(-val, 10, .lower, .{});
-        try self.cur_writer().writeByte(tags.NegativeInt);
+        try self.curWriter().printInt(-val, 10, .lower, .{});
+        try self.curWriter().writeByte(tags.NegativeInt);
     }
 }
 
 /// Write a f32 float to the writer.
 pub fn writeFloat(self: *Writer, val: f32) !void {
     try self.startWrite();
-    try self.cur_writer().writeByte(tags.Float);
-    try self.cur_writer().writeAll(&std.mem.toBytes(std.mem.nativeToBig(u32, @bitCast(val))));
+    try self.curWriter().writeByte(tags.Float);
+    try self.curWriter().writeAll(&std.mem.toBytes(std.mem.nativeToBig(u32, @bitCast(val))));
 }
 
 /// Write a f64 float to the writer.
 pub fn writeDouble(self: *Writer, val: f64) !void {
     try self.startWrite();
-    try self.cur_writer().writeByte(tags.Double);
-    try self.cur_writer().writeAll(&std.mem.toBytes(std.mem.nativeToBig(u64, @bitCast(val))));
+    try self.curWriter().writeByte(tags.Double);
+    try self.curWriter().writeAll(&std.mem.toBytes(std.mem.nativeToBig(u64, @bitCast(val))));
 }
 
 /// Write a byte slice to the writer as data.
@@ -220,25 +212,31 @@ pub fn writeSymbol(self: *Writer, val: []const u8) !void {
 
 fn writeDataInternal(self: *Writer, val: []const u8, sep: u8) !void {
     try self.startWrite();
-    try self.cur_writer().printInt(val.len, 10, .lower, .{});
-    try self.cur_writer().writeByte(sep);
-    try self.cur_writer().writeAll(val);
+    try self.curWriter().printInt(val.len, 10, .lower, .{});
+    try self.curWriter().writeByte(sep);
+    try self.curWriter().writeAll(val);
 }
 
 /// Begin writing a Sequence of data. The Sequence will be populated with subsequent writes.
 /// Call `writeEndSequence` to finish the Sequence.
 pub fn writeStartSequence(self: *Writer) !void {
     try self.startWrite();
-    try self.cur_writer().writeByte(tags.StartSequence);
+    try self.curWriter().writeByte(tags.StartSequence);
     try self.nested_datas.append(self.gpa, .sequence);
+}
+
+/// Return the provided error if the expected nested item isn't the current parent.
+fn ensureProperNesting(self: *Writer, nested_type: NestedType, err: WriterError) !void {
+    const data = self.nested_datas.pop() orelse return err;
+    if (data != nested_type) {
+        return err;
+    }
 }
 
 /// Finish writing a Sequence. Throws `SequenceUnderflow` if we aren't in any sequences.
 pub fn writeEndSequence(self: *Writer) !void {
-    if (self.nested_datas.pop() != .sequence) {
-        return error.SequenceUnderflow;
-    }
-    try self.cur_writer().writeByte(tags.EndSequence);
+    try self.ensureProperNesting(.sequence, error.SequenceUnderflow);
+    try self.curWriter().writeByte(tags.EndSequence);
 }
 
 /// Write a full Sequence of data given a list of `Generic`.
@@ -254,17 +252,15 @@ pub fn writeSequence(self: *Writer, val: []const Generic) WritingError!void {
 /// Call `writeEndRecord` to finish the Record.
 pub fn writeStartRecord(self: *Writer, label: *const Generic) !void {
     try self.startWrite();
-    try self.cur_writer().writeByte(tags.StartRecord);
-    self.nested_datas.append(self.gpa, .record);
+    try self.curWriter().writeByte(tags.StartRecord);
+    try self.nested_datas.append(self.gpa, .record);
     try self.writeGeneric(label);
 }
 
 /// Finish writing a Record. Throws `RecordUnderflow` if we aren't in any records.
 pub fn writeEndRecord(self: *Writer) !void {
-    if (self.nested_datas.pop() != .record) {
-        return error.RecordUnderflow;
-    }
-    try self.cur_writer().writeByte(tags.EndRecord);
+    try self.ensureProperNesting(.record, error.RecordUnderflow);
+    try self.curWriter().writeByte(tags.EndRecord);
 }
 
 /// Write a full Record.
@@ -276,54 +272,115 @@ pub fn writeRecord(self: *Writer, val: *const Record) WritingError!void {
     try self.writeEndRecord();
 }
 
-/// Begin writing a Dictionary of data. `tmp_buf` will be filled with subsequent writes of
+fn tmpWrittenLen(self: *Writer) usize {
+    return self.tmp_writer.written().len;
+}
+
+/// Begin writing a Dictionary of data. `tmp_writer` will be filled with subsequent writes of
 /// (alternately) keys and values, until the dictionary is complete.
 /// Call `writeEndDictionary` to finish the Dictionary.
 fn writeStartDictionary(self: *Writer) !void {
     try self.startWrite();
-    try self.cur_writer().writeByte(tags.StartDictionary);
-    try self.nested_datas.append(self.gpa, .{ .dictionary = .{} });
+    try self.curWriter().writeByte(tags.StartDictionary);
+    self.dict_or_set_depth += 1;
+    try self.nested_datas.append(self.gpa, .{ .dictionary = .{ .start_index = self.tmpWrittenLen() } });
+}
+
+fn cmpIndices(buf: []const u8, a: KeyValueIndices, b: KeyValueIndices) bool {
+    const a_slice = buf[a.key..a.value];
+    const b_slice = buf[b.key..b.value];
+    return std.mem.order(u8, a_slice, b_slice) == .lt;
+}
+
+fn sortIndices(self: *Writer, dict_data: *DictData) void {
+    std.mem.sort(KeyValueIndices, dict_data.indices.items, self.tmp_writer.written(), cmpIndices);
 }
 
 /// Finish writing a Dictionary. Throws `DictionaryUnderflow` if we aren't in any dictionaries.
 /// This sorts entries by key and then (unless we are still inside an outer Dictionary or Set) performs
 /// the actual flush of keys and values to the underlying writer, as previous calls will have
-/// only populated `tmp_buf` with items.
+/// only populated `tmp_writer` with items.
 fn writeEndDictionary(self: *Writer) !void {
-    const nested_data = if (self.nested_datas.pop()) |item| item else error.DictionaryUnderflow;
-    var dict_data = if (nested_data == .dictionary) |item| item else error.DictionaryUnderflow;
-    defer dict_data.deinit();
+    var nested_data = self.nested_datas.pop() orelse return error.DictionaryUnderflow;
+    if (@as(NestedType, nested_data) != .dictionary) {
+        return error.DictionaryUnderflow;
+    }
+    defer nested_data.deinit(self.gpa);
 
-    dict_data.calculateLastLength(self.tmp_buf.items.len);
+    if (nested_data.dictionary.indices.items.len > 0) {
+        var last = &nested_data.dictionary.indices.items[nested_data.dictionary.indices.items.len - 1];
+        last.end = self.tmpWrittenLen();
+    }
 
-    // Sort the entries which dict_data is aware of
+    // We can now sort the indices by their buffer order!
+    self.sortIndices(&nested_data.dictionary);
+
+    // Ensure we can fit a copy of the data after the current data.
+    const start_i = nested_data.dictionary.start_index;
+    const end_i = self.tmpWrittenLen();
+    const collection_len = end_i - start_i;
+    try self.tmp_writer.ensureUnusedCapacity(collection_len);
+
+    const tmp_buffer = self.tmp_writer.writer.buffer;
+    for (nested_data.dictionary.indices.items) |item| {
+        // Because we ensured capacity above, this will never realloc, so the buffer won't invalidate.
+        // Ideally there'd be a way to write while ensuring no reallocs, but that's asking too much
+        // of Allocating.Writer.
+        try self.tmp_writer.writer.writeAll(tmp_buffer[item.key..item.end]);
+    }
+
+    // Copy from the now-ordered portion back to the final position.
+    @memcpy(tmp_buffer[start_i..end_i], tmp_buffer[collection_len + start_i .. collection_len + end_i]);
+
+    // Rewind the buffer now that we've copied back to the original position.
+    self.tmp_writer.shrinkRetainingCapacity(end_i);
 
     try self.maybeFlushBuffer();
-    try self.cur_writer().writeByte(tags.EndDictionary);
+    self.dict_or_set_depth -= 1;
+    try self.curWriter().writeByte(tags.EndDictionary);
 }
 
-/// Begin writing a Set of data. `tmp_buf` will be filled with subsequent writes of
+pub fn writeDictionary(self: *Writer, val: []const Generic) WritingError!void {
+    try self.writeStartDictionary();
+    for (val) |gen| {
+        try self.writeGeneric(&gen);
+    }
+    try self.writeEndDictionary();
+}
+
+/// Begin writing a Set of data. `tmp_writer` will be filled with subsequent writes of
 /// keys, until the set is complete.
 /// Call `writeEndSet` to finish the Set.
 fn writeStartSet(self: *Writer) !void {
     try self.startWrite();
-    try self.cur_writer().writeByte(tags.StartSet);
-    try self.nested_datas.append(self.gpa, .{ .set = .{} });
+    try self.curWriter().writeByte(tags.StartSet);
+    self.dict_or_set_depth += 1;
+    try self.nested_datas.append(self.gpa, .{ .set = .{ .start_index = self.tmpWrittenLen() } });
 }
 
 /// Finish writing a Set. Throws `SetUnderflow` if we aren't in any sets.
 /// This sorts entries and then (unless we are still inside an outer Dictionary or Set) performs
 /// the actual flush of keys to the underlying writer, as previous calls will have
-/// only populated `tmp_buf` with items.
+/// only populated `tmp_writer` with items.
 fn writeEndSet(self: *Writer) !void {
-    const nested_data = if (self.nested_datas.pop()) |item| item else error.SetUnderflow;
-    var dict_data = if (nested_data == .set) |*item| item else error.SetUnderflow;
-    defer dict_data.deinit();
+    var nested_data = self.nested_datas.pop() orelse return error.DictionaryUnderflow;
+    if (@as(NestedType, nested_data) != .dictionary) {
+        return error.DictionaryUnderflow;
+    }
 
-    dict_data.calculateLastLength(self.tmp_buf.items.len);
+    defer nested_data.deinit(self.gpa);
 
     try self.maybeFlushBuffer();
-    try self.cur_writer().writeByte(tags.EndSet);
+    self.dict_or_set_depth -= 1;
+    try self.curWriter().writeByte(tags.EndSet);
+}
+
+pub fn writeSet(self: *Writer, val: []const Generic) WritingError!void {
+    try self.writeStartSet();
+    for (val) |gen| {
+        try self.writeGeneric(&gen);
+    }
+    try self.writeEndSet();
 }
 
 /// Start a write operation. We record index positions if we are in a Dictionary or Set.
@@ -332,22 +389,31 @@ fn startWrite(self: *Writer) !void {
         return;
     }
 
-    var last = &self.nested_datas.items[self.nested_datas.items.len - 1];
-    switch (last.*) {
+    const last_nested_data = &self.nested_datas.items[self.nested_datas.items.len - 1];
+    switch (last_nested_data.*) {
         .dictionary => |*dict_data| {
-            if (dict_data.cur_type == .key) {
-                dict_data.calculateLastLength(self.tmp_buf.items.len);
-                try dict_data.key_values.append(self.gpa, .{ .key_index = self.tmp_buf.items.len });
-                dict_data.cur_type = .value;
-            } else {
-                var item = &dict_data.key_values.items[dict_data.key_values.items.len - 1];
-                item.value_index = self.tmp_buf.items.len;
-                dict_data.cur_type = .key;
+            if (dict_data.indices.items.len > 0) {
+                var cur = &dict_data.indices.items[dict_data.indices.items.len - 1];
+                if (cur.value == 0) {
+                    // Value index is still zero, so we are writing the value now.
+                    cur.value = self.tmpWrittenLen();
+                    return;
+                } else {
+                    // Otherwise we write the end index of the current item, and then afterwards add.
+                    cur.end = self.tmpWrittenLen();
+                }
             }
+
+            try dict_data.indices.append(self.gpa, .{ .key = self.tmpWrittenLen() });
         },
         .set => |*dict_data| {
-            dict_data.calculateLastLength(self.tmp_buf.items.len);
-            try dict_data.key_values.append(self.gpa, .{ .key_index = self.tmp_buf.items.len });
+            if (dict_data.indices.items.len > 0) {
+                var cur = &dict_data.indices.items[dict_data.indices.items.len - 1];
+                // We write the end index of the current item, and then afterwards add.
+                cur.end = self.tmpWrittenLen();
+            }
+
+            try dict_data.indices.append(self.gpa, .{ .key = self.tmpWrittenLen() });
         },
         else => {},
     }
@@ -355,9 +421,9 @@ fn startWrite(self: *Writer) !void {
 
 /// If we are no longer inside any dictionaries or sets, flush the temp buffer to the Io.Writer and clear the buffer.
 fn maybeFlushBuffer(self: *Writer) !void {
-    if (self.dictionary_depth <= 0 and self.set_depth <= 0) {
-        self.io_writer.writeAll(self.tmp_buf.items);
-        self.tmp_buf.clearRetainingCapacity();
+    if (self.tmpWrittenLen() > 0) {
+        try self.underlying_writer.writeAll(self.tmp_writer.written());
+        self.tmp_writer.clearRetainingCapacity();
     }
 }
 
@@ -368,7 +434,7 @@ fn expectRootLevel(self: *Writer) !void {
 
 test "basic datatype" {
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
-    var writer = Writer{ .io_writer = &output.writer, .gpa = std.testing.allocator };
+    var writer = Writer.init(&output.writer, std.testing.allocator);
     defer output.deinit();
     defer writer.deinit();
 
@@ -383,7 +449,7 @@ test "basic datatype" {
 
 test "float datatype" {
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
-    var writer = Writer{ .io_writer = &output.writer, .gpa = std.testing.allocator };
+    var writer = Writer.init(&output.writer, std.testing.allocator);
     defer output.deinit();
     defer writer.deinit();
 
@@ -395,7 +461,7 @@ test "float datatype" {
 
 test "string datatype" {
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
-    var writer = Writer{ .io_writer = &output.writer, .gpa = std.testing.allocator };
+    var writer = Writer.init(&output.writer, std.testing.allocator);
     defer output.deinit();
     defer writer.deinit();
 
@@ -408,7 +474,7 @@ test "string datatype" {
 
 test "data datatype" {
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
-    var writer = Writer{ .io_writer = &output.writer, .gpa = std.testing.allocator };
+    var writer = Writer.init(&output.writer, std.testing.allocator);
     defer output.deinit();
     defer writer.deinit();
 
@@ -419,7 +485,7 @@ test "data datatype" {
 
 test "symbol datatype" {
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
-    var writer = Writer{ .io_writer = &output.writer, .gpa = std.testing.allocator };
+    var writer = Writer.init(&output.writer, std.testing.allocator);
     defer output.deinit();
     defer writer.deinit();
 
@@ -440,7 +506,7 @@ test "sequence datatype" {
     };
 
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
-    var writer = Writer{ .io_writer = &output.writer, .gpa = std.testing.allocator };
+    var writer = Writer.init(&output.writer, std.testing.allocator);
     defer output.deinit();
     defer writer.deinit();
 
@@ -451,7 +517,7 @@ test "sequence datatype" {
 
 test "record datatype" {
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
-    var writer = Writer{ .io_writer = &output.writer, .gpa = std.testing.allocator };
+    var writer = Writer.init(&output.writer, std.testing.allocator);
     defer output.deinit();
     defer writer.deinit();
 
@@ -476,18 +542,47 @@ test "record datatype" {
 
 test "simple dictionary datatype" {
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
-    var writer = Writer{ .io_writer = &output.writer, .gpa = std.testing.allocator };
+    var writer = Writer.init(&output.writer, std.testing.allocator);
     defer output.deinit();
     defer writer.deinit();
 
+    const dict = [_]Generic{
+        .{ .string = "key2" },
+        .{ .int = .{ .i32 = 45 } },
+        .{ .string = "key1" },
+        .{ .int = .{ .i32 = 42 } },
+        .{ .string = "key8" },
+        .{ .int = .{ .i32 = 2 } },
+        .{ .string = "key3" },
+        .{ .int = .{ .i32 = 4 } },
+    };
+
+    try writer.writeDictionary(&dict);
+    try std.testing.expectEqualStrings("{4\"key142+4\"key245+4\"key34+4\"key82+}", output.written());
     try writer.expectRootLevel();
 }
 
 test "nested dictionary datatype" {
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
-    var writer = Writer{ .io_writer = &output.writer, .gpa = std.testing.allocator };
+    var writer = Writer.init(&output.writer, std.testing.allocator);
     defer output.deinit();
     defer writer.deinit();
+
+    // Dictionary which has *nested* dictionaries as a key (gross, but allowed)
+    // and a dictionary as a value for fun as well.
+    const dict = [_]Generic{
+        .{ .string = "key2" },
+        .{ .int = .{ .i32 = 45 } },
+        .{ .string = "key1" },
+        .{ .int = .{ .i32 = 42 } },
+        .{ .string = "key8" },
+        .{ .int = .{ .i32 = 2 } },
+        .{ .string = "key3" },
+        .{ .int = .{ .i32 = 4 } },
+    };
+
+    try writer.writeDictionary(&dict);
+    try std.testing.expectEqualStrings("{4\"key142+4\"key245+4\"key34+4\"key82+}", output.written());
 
     try writer.expectRootLevel();
 }

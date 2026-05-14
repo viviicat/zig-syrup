@@ -18,4 +18,6 @@ pub const Generic = union(enum) {
     symbol: []const u8,
     sequence: []const Generic,
     record: Record,
+    dictionary: []const Generic,
+    set: []const Generic,
 };
