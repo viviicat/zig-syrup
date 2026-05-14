@@ -10,6 +10,7 @@ I'll probably add some build script for this, but for now, to browse documentati
 
 1. `zig build-lib -femit-docs src/root.zig` to build docs into docs/
 2. `python -m http.server 8080 -d docs/` (or some other similar minimal web server)
+3. Go to [localhost:8080](http://localhost:8080) (idk why i'm even explaining this)
 
 # Implemented data types
 
