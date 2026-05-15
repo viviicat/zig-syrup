@@ -98,7 +98,7 @@ inline fn curWriter(self: *Writer) *std.Io.Writer {
 
 /// Write a supported type.
 pub fn write(self: *Writer, val: anytype) !void {
-    return self.writeWithFormat(val, .default);
+    return self.writeWithFieldType(val, .default);
 }
 
 fn writeBytesWithType(self: *Writer, val: []const u8, field_type: FieldType) !void {
@@ -106,7 +106,7 @@ fn writeBytesWithType(self: *Writer, val: []const u8, field_type: FieldType) !vo
         .string, .default => try self.writeString(val),
         .data => try self.writeData(val),
         .symbol => try self.writeSymbol(val),
-        .sequence => unreachable,
+        .sequence, .set, .dictionary => unreachable,
     }
 }
 
@@ -115,13 +115,13 @@ fn writeRecordStartWithType(self: *Writer, val: []const u8, field_type: FieldTyp
         .string, .default => Value{ .string = val },
         .data => Value{ .data = val },
         .symbol => Value{ .symbol = val },
-        .sequence => unreachable,
+        .sequence, .set, .dictionary => unreachable,
     };
 
     try self.writeRecordStart(&val_value);
 }
 
-fn writeWithFormat(self: *Writer, val: anytype, field_type: FieldType) !void {
+fn writeWithFieldType(self: *Writer, val: anytype, comptime field_type: FieldType) !void {
     const ValType = @TypeOf(val);
     const val_info = @typeInfo(ValType);
 
@@ -148,38 +148,104 @@ fn writeWithFormat(self: *Writer, val: anytype, field_type: FieldType) !void {
             .null => self.writeBoolean(false),
             .optional => {
                 if (val) |payload| {
-                    return self.writeWithFormat(payload, field_type);
+                    return self.writeWithFieldType(payload, field_type);
                 } else {
-                    return self.writeWithFormat(null, field_type);
+                    return self.writeWithFieldType(null, field_type);
                 }
             },
-            .array => self.writeWithFormat(&val, field_type),
+            .array => self.writeWithFieldType(&val, field_type),
             .vector => |info| {
                 const array: [info.len]info.child = val;
-                return self.writeWithFormat(&array, field_type);
+                return self.writeWithFieldType(&array, field_type);
             },
             .@"struct" => |structure| {
                 const TypeName = @typeName(ValType);
+
+                // Check if it's an instance of a HashMap, if so we can write it as a Dictionary.
+                // If it has a KV declaration we assume it is. A little more fragile than I would like, but I think it's relatively okay.
+                const is_hash_map_like = @hasDecl(ValType, "KV");
+
+                if (is_hash_map_like) {
+                    const V = @typeInfo(@field(ValType, "KV")).@"struct".fields[1].type;
+                    switch (V) {
+                        void => {
+                            if (field_type != .default and field_type != .set) {
+                                @compileError(TypeName ++ " was detected to be a Set (seems to be HashMap with void V), but the field type specified for it was not `.set`.");
+                            }
+
+                            const set_type = comptime if (field_type == .set)
+                                field_type.set.toFieldType()
+                            else
+                                .default;
+
+                            try self.writeSetStart();
+
+                            // Support both a standard HashMap that has a keyIterator, and the StaticStringMap which just has a keys function.
+                            if (std.meta.hasFn(ValType, "keyIterator")) {
+                                for (val.keys()) |key| {
+                                    try self.writeWithFieldType(key, set_type);
+                                }
+                                var i = 0;
+                                var it = val.keyIterator();
+                                while (it.next()) |key| {
+                                    try self.writeWithFieldType(key, set_type);
+                                    i += 1;
+                                }
+                            } else if (std.meta.hasFn(ValType, "keys")) {
+                                for (val.keys()) |key| {
+                                    try self.writeWithFieldType(key, set_type);
+                                }
+                            } else @compileError("Found what looks like a set (has a KV decl with a void value) but it doesn't have `keyIterator` or `keys` functions");
+                            return self.writeSetEnd();
+                        },
+                        else => {
+                            if (field_type != .default and field_type != .dictionary) {
+                                @compileError(TypeName ++ " was detected to be a Dictionary (seems to be HashMap), but the field type specified for it was not `.dictionary`.");
+                            }
+
+                            const dict_key_type = if (field_type == .dictionary) field_type.dictionary.key.toFieldType() else .default;
+                            const dict_value_type = if (field_type == .dictionary) field_type.dictionary.value.toFieldType() else .default;
+
+                            try self.writeDictionaryStart();
+                            // Support both a standard HashMap that has an iterator, and the StaticStringMap which just has a kvs field
+                            if (std.meta.hasFn(ValType, "iterator")) {
+                                var i = 0;
+                                var it = val.iterator();
+                                while (it.next()) |kv| {
+                                    try self.writeWithFieldType(kv.key, dict_key_type);
+                                    try self.writeWithFieldType(kv.value, dict_value_type);
+                                    i += 1;
+                                }
+                            } else if (std.meta.hasFn(ValType, "keys")) {
+                                for (0..val.kvs.len) |i| {
+                                    try self.writeWithFieldType(val.kvs.keys[i], dict_key_type);
+                                    try self.writeWithFieldType(val.kvs.values[i], dict_value_type);
+                                }
+                            } else @compileError("Found a dictionary-like struct (has a KV decl with key and value) but it doesn't have `iterator` or `keys` functions");
+                            return self.writeDictionaryEnd();
+                        },
+                    }
+                }
+
                 const has_wire_format = @hasDecl(ValType, "wire_format");
 
                 if (has_wire_format) {
                     if (ValType.wire_format.fields) |field_types| {
                         // Verify wire format count matches field count
                         if (field_types.len != structure.fields.len) {
-                            @compileError(std.fmt.comptimePrint("found wire_format declaration in {s}, length of field type list ({}) doesn't match the number of fields ({}).", .{ TypeName, field_types.len, structure.fields.len }));
+                            @compileError(std.fmt.comptimePrint(
+                                "found wire_format declaration in {s}, length of field type list ({}) doesn't match the number of fields ({}).",
+                                .{ TypeName, field_types.len, structure.fields.len },
+                            ));
                         }
                     }
                 }
 
                 if (!has_wire_format or ValType.wire_format.layout == .record) {
                     const record_label_type: FieldType = if (has_wire_format)
-                        ValType.wire_format.layout.record.label_type
+                        ValType.wire_format.layout.record.label
                     else
                         .default;
-
-                    if (ValType.wire_format.layout == .sequence) {
-                        @compileError(TypeName ++ ": cannot use FieldType.sequence for a record's label. Only use it for fields.");
-                    }
 
                     const type_name = if (has_wire_format)
                         ValType.wire_format.layout.record.name orelse TypeName
@@ -197,13 +263,20 @@ fn writeWithFormat(self: *Writer, val: anytype, field_type: FieldType) !void {
 
                 comptime var i = 0;
                 inline for (structure.fields) |Field| {
-                    const ft = if (has_wire_format) if (ValType.wire_format.fields) |field_types| field_types[i] else .default else .default;
-                    i += 1;
-
-                    if (ValType.wire_format.layout == .dictionary) {
-                        try self.writeWithFormat(Field.name, ValType.wire_format.layout.dictionary);
+                    if (has_wire_format and ValType.wire_format.layout == .dictionary) {
+                        try self.writeWithFieldType(Field.name, ValType.wire_format.layout.dictionary);
                     }
-                    try self.writeWithFormat(@field(val, Field.name), ft);
+
+                    const ft = if (has_wire_format)
+                        if (ValType.wire_format.fields) |field_types|
+                            field_types[i]
+                        else
+                            .default
+                    else
+                        .default;
+
+                    try self.writeWithFieldType(@field(val, Field.name), ft);
+                    i += 1;
                 }
 
                 if (!has_wire_format or ValType.wire_format.layout == .record) {
@@ -224,10 +297,10 @@ fn writeWithFormat(self: *Writer, val: anytype, field_type: FieldType) !void {
                         .array => {
                             // Coerce `*[N]T` to `[]const T`.
                             const Slice = []const std.meta.Elem(ChildType);
-                            return self.writeWithFormat(@as(Slice, val), field_type);
+                            return self.writeWithFieldType(@as(Slice, val), field_type);
                         },
                         else => {
-                            return self.writeWithFormat(val.*, field_type);
+                            return self.writeWithFieldType(val.*, field_type);
                         },
                     };
                 },
@@ -236,14 +309,24 @@ fn writeWithFormat(self: *Writer, val: anytype, field_type: FieldType) !void {
                         @compileError("unable to syrupify type '" ++ @typeName(ValType) ++ "' without sentinel");
                     const slice = if (ptr_info.size == .many) std.mem.span(val) else val;
                     if (ptr_info.child == u8 and field_type != .sequence) {
-                        return self.writeBytesWithType(slice, field_type);
+                        switch (field_type) {
+                            .default, .string, .symbol, .data => {
+                                return self.writeBytesWithType(slice, field_type);
+                            },
+                            else => {},
+                        }
                     }
 
-                    try self.writeSequenceStart();
-                    for (slice) |item| {
-                        try self.writeWithFormat(item, field_type);
+                    switch (field_type) {
+                        .sequence, .default => {
+                            try self.writeSequenceStart();
+                            for (slice) |item| {
+                                try self.writeWithFieldType(item, field_type);
+                            }
+                            return self.writeSequenceEnd();
+                        },
+                        else => @compileError(std.fmt.comptimePrint("unsupported field type {s} for slice {s}. Dictionaries and sets cannot be safely serialized from slices due to non-uniqueness", .{ @tagName(field_type), @typeName(ValType) })),
                     }
-                    return self.writeSequenceEnd();
                 },
                 else => @compileError("unsupported pointer type " ++ @typeName(ValType)),
             },
@@ -589,9 +672,57 @@ fn maybeFlushBuffer(self: *Writer) !void {
     }
 }
 
-/// Enum for specifying the type to use when serializing to Syrup.
-pub const FieldType = enum {
+/// Enum for specifying the type to use when serializing a Zig field to Syrup.
+pub const FieldType = union(enum) {
+    /// Simplified field type for types that are used inside Dictionaries and Maps.
+    ///
+    /// Note: If you need to customize settings for a Dictionary that contains a Set or a Dictionary,
+    /// that's not possible this way, because of circular dependencies in the `FieldType` union.
+    /// In the future a `syrupify` function will be used for custom serialization of complex types.
+    pub const SimpleFieldType = enum {
+        /// The field is serialized with the default options.
+        /// `[]const u8` fields are serialized as strings by default.
+        /// `[]const u8` keys for Sets and Dictionaries, and values for Dictionaries are serialized as strings by default.
+        /// The label of a Record type is serialized as a symbol by default.
+        /// All other array-like fields are serialized as a Sequence.
+        default,
+        /// `[]const u8` field serialized as a string.
+        string,
+        /// `[]const u8` field serialized as a symbol.
+        symbol,
+        /// `[]const u8` field serialized as data.
+        data,
+        /// array-like field serialized as a sequence.
+        sequence,
+
+        pub fn toFieldType(comptime self: SimpleFieldType) FieldType {
+            return switch (self) {
+                .default => .default,
+                .string => .string,
+                .symbol => .symbol,
+                .data => .data,
+                .sequence => .sequence,
+            };
+        }
+    };
+
+    /// Field type for Dictionaries, containing both a key and a value type.
+    ///
+    /// Note: If you need to customize settings for a Dictionary that contains a Set or a Dictionary,
+    /// that's not possible this way, because of circular dependencies in the `FieldType` union.
+    /// In the future a `syrupify` function will be used for custom serialization of complex types.
+    pub const DictionaryFieldType = struct {
+        /// The type of the key for the dictionary.
+        key: SimpleFieldType = .default,
+        /// The type of the value for the dictionary.
+        value: SimpleFieldType = .default,
+    };
+
     /// The field is serialized with the default options.
+    /// `[]const u8` fields are serialized as strings by default.
+    /// `[]const u8` keys for Sets and Dictionaries, and values for Dictionaries are serialized as strings by default.
+    /// The label of a Record type is serialized as a symbol by default.
+    /// All other array-like fields are serialized as a Sequence.
     default,
     /// Field serialized as a string.
     string,
@@ -601,19 +732,23 @@ pub const FieldType = enum {
     data,
     /// Single array-like field serialized as a sequence.
     sequence,
+    /// The field is a dictionary.
+    dictionary: DictionaryFieldType,
+    /// The field is a set of the given field type.
+    set: SimpleFieldType,
 };
 
 /// A structure that can be defined as a compile time constant in a structure with the name `wire_format`.
 /// This will be detected at compile time and used to determine the types to use when serializing bytes.
 pub const WireFormat = struct {
     /// Structure for defining the layout for Zig struct when serialized to Syrup.
-    pub const Layout = union(enum) {
+    const ContainerLayout = union(enum) {
         /// Options for when a Zig struct is serialized as a Syrup Record.
         pub const RecordOptions = struct {
             /// Name to use for the struct in the Record's label.
             name: ?[]const u8 = null,
             /// The type to use for the record's label.
-            label_type: FieldType = .symbol,
+            label: FieldType = .symbol,
         };
 
         /// Serialize the structure as a Record, with the specified `FieldType` as the type of the record' label. The label's value will be the type name of the struct.
@@ -625,7 +760,7 @@ pub const WireFormat = struct {
     };
 
     /// The layout that the structure is serialized in.
-    layout: Layout = .{ .record = .{ .label_type = .symbol } },
+    layout: ContainerLayout = .{ .record = .{} },
     /// List of types to use for each field. The length must match the number of fields in the structure.
     fields: ?[]const FieldType = null,
 };
@@ -1041,7 +1176,7 @@ test "The Grand Menagerie (ocapn spec test data)" {
 
 const MyStruct = struct {
     const wire_format = WireFormat{
-        .layout = .{ .record = .{ .label_type = .string } },
+        .layout = .{ .record = .{ .label = .string } },
         .fields = &[_]FieldType{
             .string,
             .symbol,
@@ -1087,12 +1222,15 @@ test "wire format" {
     );
 }
 
+const TestSet = std.StaticStringMap(void);
+const TestKVSet = struct { []const u8 };
+
 const Zoo = struct {
     const wire_format = WireFormat{
         .layout = .{
             .record = .{
                 .name = "zoo",
-                .label_type = .data,
+                .label = .data,
             },
         },
     };
@@ -1106,6 +1244,7 @@ const Zoo = struct {
                 .default,
                 .default,
                 .default,
+                .{ .set = .data },
             },
         };
 
@@ -1114,8 +1253,7 @@ const Zoo = struct {
         age: i32,
         weight: f64,
         @"alive?": bool,
-        // TODO: support for sets using std.hash_map
-        // eats: []const []const u8,
+        eats: *const TestSet,
     };
 
     name: []const u8,
@@ -1124,6 +1262,16 @@ const Zoo = struct {
 
 test "zig type menagerie" {
     const zoo_bin = @embedFile("test-data/zoo.bin");
+
+    const tabatha_eats = TestSet.initComptime(
+        &[_]TestKVSet{ .{"mice"}, .{"fish"}, .{"kibble"} },
+    );
+    const george_eats = TestSet.initComptime(
+        &[_]TestKVSet{ .{"bananas"}, .{"insects"} },
+    );
+    const casper_eats = TestSet.initComptime(
+        &[_]TestKVSet{},
+    );
 
     const menagerie = Zoo{
         .name = "The Grand Menagerie",
@@ -1134,7 +1282,23 @@ test "zig type menagerie" {
                 .age = 12,
                 .weight = 8.2,
                 .@"alive?" = true,
-                // .eats = &[_][]const u8{ "mice", "fish", "kibble" },
+                .eats = &tabatha_eats,
+            },
+            .{
+                .species = "monkey",
+                .name = "George",
+                .age = 6,
+                .weight = 17.24,
+                .@"alive?" = false,
+                .eats = &george_eats,
+            },
+            .{
+                .species = "ghost",
+                .name = "Casper",
+                .age = -12,
+                .weight = -34.5,
+                .@"alive?" = false,
+                .eats = &casper_eats,
             },
         },
     };
@@ -1148,3 +1312,8 @@ test "zig type menagerie" {
 
     try std.testing.expectEqualStrings(zoo_bin, output.written());
 }
+
+// TODO!
+test "test struct with a non-static hashmap" {}
+test "test struct with a static dictionary hashmap" {}
+test "test struct with a non-static dictionary hashmap" {}
