@@ -44,6 +44,32 @@ I'll probably add some build script for this, but for now, to browse documentati
 - [x] Records
 - [x] Sets
 
+## Zig types
+
+Zig Types that can be serialized to Syrup
+
+- [x] integers (any length)
+- [x] f32
+- [x] f64
+- [ ] comptime integers
+- [ ] comptime f32
+- [ ] comptime f64
+- [ ] optionals
+- [ ] enum literals
+- [x] arrays
+- [ ] slices (only slices of Value)
+- [ ] vectors
+- [x] `[]const u8`
+- [x] structs 
+  - [ ] copies of structs (currently only struct pointers supported)
+  - [x] as Record (label is the type name)
+  - [x] as Sequence (just the field values)
+  - [x] as Dictionary (key is the field name)
+- [ ] unions
+- [ ] tuples
+- [ ] error sets
+- [ ] general pointers
+
 # TODO
 
 - [ ] **ZON to syrup conversion** - Zig's ZON format could possibly be converted to Syrup, if we so pleased.
