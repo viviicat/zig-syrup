@@ -171,24 +171,24 @@ fn writeWithFormat(self: *Writer, val: anytype, field_type: FieldType) !void {
                     }
                 }
 
-                if (!has_wire_format or ValType.wire_format.struct_type == .record) {
+                if (!has_wire_format or ValType.wire_format.layout == .record) {
                     const record_label_type: FieldType = if (has_wire_format)
-                        ValType.wire_format.struct_type.record.field_type
+                        ValType.wire_format.layout.record.field_type
                     else
                         .default;
 
-                    if (ValType.wire_format.struct_type == .sequence) {
+                    if (ValType.wire_format.layout == .sequence) {
                         @compileError(TypeName ++ ": cannot use FieldType.sequence for a record's label. Only use it for fields.");
                     }
 
                     const type_name = if (has_wire_format)
-                        ValType.wire_format.struct_type.record.name orelse TypeName
+                        ValType.wire_format.layout.record.name orelse TypeName
                     else
                         TypeName;
 
                     try self.writeRecordStartWithType(type_name, record_label_type);
                 } else {
-                    switch (ValType.wire_format.struct_type) {
+                    switch (ValType.wire_format.layout) {
                         .sequence => try self.writeSequenceStart(),
                         .dictionary => try self.writeDictionaryStart(),
                         .record => {},
@@ -200,16 +200,16 @@ fn writeWithFormat(self: *Writer, val: anytype, field_type: FieldType) !void {
                     const ft = if (has_wire_format) if (ValType.wire_format.fields) |field_types| field_types[i] else .default else .default;
                     i += 1;
 
-                    if (ValType.wire_format.struct_type == .dictionary) {
-                        try self.writeWithFormat(Field.name, ValType.wire_format.struct_type.dictionary);
+                    if (ValType.wire_format.layout == .dictionary) {
+                        try self.writeWithFormat(Field.name, ValType.wire_format.layout.dictionary);
                     }
                     try self.writeWithFormat(@field(val, Field.name), ft);
                 }
 
-                if (!has_wire_format or ValType.wire_format.struct_type == .record) {
+                if (!has_wire_format or ValType.wire_format.layout == .record) {
                     return self.writeRecordEnd();
                 } else {
-                    switch (ValType.wire_format.struct_type) {
+                    switch (ValType.wire_format.layout) {
                         .sequence => return self.writeSequenceEnd(),
                         .dictionary => return self.writeDictionaryEnd(),
                         .record => {},
@@ -622,7 +622,7 @@ pub const WireFormat = struct {
     };
 
     /// The type of field to use when serializing the type name of a structore or union as a Record.
-    struct_type: Layout = .{ .record = .{ .field_type = .symbol } },
+    layout: Layout = .{ .record = .{ .field_type = .symbol } },
     /// List of types to use for each field. The length must match the number of fields in the structure.
     fields: ?[]const FieldType = null,
 };
@@ -1038,7 +1038,7 @@ test "The Grand Menagerie (ocapn spec test data)" {
 
 const MyStruct = struct {
     const wire_format = WireFormat{
-        .struct_type = .{ .record = .{ .field_type = .string } },
+        .layout = .{ .record = .{ .field_type = .string } },
         .fields = &[_]FieldType{
             .string,
             .symbol,
@@ -1086,7 +1086,7 @@ test "wire format" {
 
 const Zoo = struct {
     const wire_format = WireFormat{
-        .struct_type = .{
+        .layout = .{
             .record = .{
                 .name = "zoo",
                 .field_type = .data,
@@ -1096,7 +1096,7 @@ const Zoo = struct {
 
     const Animal = struct {
         const wire_format = WireFormat{
-            .struct_type = .{ .dictionary = .symbol },
+            .layout = .{ .dictionary = .symbol },
             .fields = &[_]FieldType{
                 .data,
                 .string,
