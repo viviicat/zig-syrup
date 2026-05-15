@@ -1326,6 +1326,7 @@ test "static dictionary hashmap" {}
 test "non-static dictionary hashmap" {}
 
 test "zon to menagerie" {
+    // TODO: lots of copies of this embedded file lol
     const zoo_bin = @embedFile("test-data/zoo.bin");
     const zoo_zon = @embedFile("test-data/zoo.zon");
 
