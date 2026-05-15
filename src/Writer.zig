@@ -133,16 +133,30 @@ fn writeWithFormat(self: *Writer, val: anytype, field_type: FieldType) !void {
         bool => self.writeBoolean(val),
         f32 => self.writeFloat(val),
         f64 => self.writeDouble(val),
-        comptime_float => self.writeDouble(@as(f64, val)),
         *const []Value => self.writeSequence(val),
         *const []u8 => @compileError("use one of writeString, writeData, writeSymbol when writing bytes, or wrap it in a Value to specify its type."),
         else => switch (val_info) {
             .int => self.writeInt(val),
+            .comptime_float => {
+                if (@as(f64, @floatCast(val)) == val) {
+                    return self.writeDouble(@as(f64, val));
+                }
+
+                @compileError("comptime float cannot be converted to f64");
+            },
             .comptime_int => self.writeInt(val),
-            .array => self.write(&val),
+            .null => self.writeBoolean(false),
+            .optional => {
+                if (val) |payload| {
+                    return self.writeWithFormat(payload, field_type);
+                } else {
+                    return self.writeWithFormat(null, field_type);
+                }
+            },
+            .array => self.writeWithFormat(&val, field_type),
             .vector => |info| {
                 const array: [info.len]info.child = val;
-                return self.write(&array);
+                return self.writeWithFormat(&array, field_type);
             },
             .@"struct" => |structure| {
                 const TypeName = @typeName(ValType);
@@ -203,10 +217,10 @@ fn writeWithFormat(self: *Writer, val: anytype, field_type: FieldType) !void {
                         .array => {
                             // Coerce `*[N]T` to `[]const T`.
                             const Slice = []const std.meta.Elem(ChildType);
-                            return self.write(@as(Slice, val));
+                            return self.writeWithFormat(@as(Slice, val), field_type);
                         },
                         else => {
-                            return self.write(val.*);
+                            return self.writeWithFormat(val.*, field_type);
                         },
                     };
                 },
@@ -220,7 +234,7 @@ fn writeWithFormat(self: *Writer, val: anytype, field_type: FieldType) !void {
 
                     try self.writeSequenceStart();
                     for (slice) |item| {
-                        try self.write(item);
+                        try self.writeWithFormat(item, field_type);
                     }
                     return self.writeSequenceEnd();
                 },
@@ -1053,7 +1067,7 @@ test "wire format" {
             42,
             45,
             46,
-        } ++ ">",
+        } ++ "[42+69+67+]>",
         output.written(),
     );
 }
