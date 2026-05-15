@@ -98,6 +98,28 @@ inline fn curWriter(self: *Writer) *std.Io.Writer {
 
 /// Write a supported type.
 pub fn write(self: *Writer, val: anytype) !void {
+    return self.writeWithFormat(val, .default);
+}
+
+fn writeBytesWithType(self: *Writer, val: []const u8, field_type: FieldType) !void {
+    switch (field_type) {
+        .string, .default => try self.writeString(val),
+        .data => try self.writeData(val),
+        .symbol => try self.writeSymbol(val),
+    }
+}
+
+fn writeRecordStartWithType(self: *Writer, val: []const u8, field_type: FieldType) !void {
+    const val_value = switch (field_type) {
+        .string, .default => Value{ .string = val },
+        .data => Value{ .data = val },
+        .symbol => Value{ .symbol = val },
+    };
+
+    try self.writeRecordStart(&val_value);
+}
+
+fn writeWithFormat(self: *Writer, val: anytype, field_type: FieldType) !void {
     const ValType = @TypeOf(val);
     const ValInfo = @typeInfo(ValType);
 
@@ -115,17 +137,75 @@ pub fn write(self: *Writer, val: anytype) !void {
         else => switch (ValInfo) {
             .int => self.writeInt(val),
             .comptime_int => self.writeInt(val),
-            .pointer => |ptr| switch (ptr.size) {
+            .pointer => |ptr_info| switch (ptr_info.size) {
                 .one => {
-                    const child_info = @typeInfo(ptr.child);
+                    const ChildType = ptr_info.child;
+                    const child_info = @typeInfo(ChildType);
                     return switch (child_info) {
                         .array => switch (child_info.array.child) {
                             u8 => @compileError("use one of writeString, writeData, writeSymbol when writing bytes, or wrap it in a Value to specify its type."),
                             Value => self.writeSequence(val),
                             else => @compileError("unsupported pointer type " ++ @typeName(ValType)),
                         },
+                        .@"struct" => |structure| {
+                            const TypeName = @typeName(ChildType);
+                            const has_wire_format = @hasDecl(ChildType, "wire_format");
+
+                            if (has_wire_format) {
+                                // Verify wire format count matches field count
+                                if (ChildType.wire_format.fields.len != structure.fields.len) {
+                                    @compileError(std.fmt.comptimePrint("found wire_format declaration in {s}, but number of fields ({}) doesn't match the format length ({}).", .{ TypeName, structure.fields.len, ChildType.wire_format.fields.len }));
+                                }
+                            }
+
+                            if (!has_wire_format or ChildType.wire_format.type_name == .record) {
+                                const record_label_type: FieldType = if (has_wire_format)
+                                    ChildType.wire_format.type_name.record
+                                else
+                                    .default;
+
+                                try self.writeRecordStartWithType(TypeName, record_label_type);
+                            } else {
+                                switch (ChildType.wire_format.type_name) {
+                                    .sequence => try self.writeSequenceStart(),
+                                    .dictionary => try self.writeDictionaryStart(),
+                                    .record => {},
+                                }
+                            }
+
+                            comptime var i = 0;
+                            inline for (structure.fields) |Field| {
+                                const ft = if (has_wire_format) ChildType.wire_format.fields[i] else .default;
+                                i += 1;
+
+                                if (ChildType.wire_format.type_name == .dictionary) {
+                                    try self.writeWithFormat(Field.name, ChildType.wire_format.type_name.dictionary);
+                                }
+                                try self.writeWithFormat(@field(val, Field.name), ft);
+                            }
+
+                            if (!has_wire_format or ChildType.wire_format.type_name == .record) {
+                                try self.writeRecordEnd();
+                            } else {
+                                switch (ChildType.wire_format.type_name) {
+                                    .sequence => try self.writeSequenceEnd(),
+                                    .dictionary => try self.writeDictionaryEnd(),
+                                    .record => {},
+                                }
+                            }
+                        },
                         else => @compileError("unsupported pointer type " ++ @typeName(ValType)),
                     };
+                },
+                .many, .slice => {
+                    if (ptr_info.size == .many and ptr_info.sentinel() == null)
+                        @compileError("unable to syrupify type '" ++ @typeName(ValType) ++ "' without sentinel");
+                    const slice = if (ptr_info.size == .many) std.mem.span(val) else val;
+                    if (ptr_info.child == u8) {
+                        return self.writeBytesWithType(slice, field_type);
+                    }
+
+                    return self.writeSequence(slice);
                 },
                 else => @compileError("unsupported pointer type " ++ @typeName(ValType)),
             },
@@ -470,6 +550,37 @@ fn maybeFlushBuffer(self: *Writer) !void {
         self.tmp_writer.clearRetainingCapacity();
     }
 }
+
+/// Enum for specifying the type to use when serializing to Syrup.
+pub const FieldType = enum {
+    /// The field is serialized with the default options.
+    default,
+    /// Field serialized as a string.
+    string,
+    /// Field serialized as a symbol.
+    symbol,
+    /// Field serialized as raw data.
+    data,
+};
+
+/// A structure that can be defined as a compile time constant in a structure with the name `wire_format`.
+/// This will be detected at compile time and used to determine the types to use when serializing bytes.
+pub const WireFormat = struct {
+    /// The layout that a structure is serialized in.
+    pub const Layout = union(enum) {
+        /// Serialize the structure as a Record, with the specified `FieldType` as the type of the record' label. The label's value will be the type name of the struct.
+        record: FieldType,
+        /// Serialize the structure's fields as a sequence without emitting the structure's type name or the field names.
+        sequence,
+        /// Serialize the structure's fields as a dictionary without emitting the structure's type name. The specified `FieldType` is the type to use for each field's name.
+        dictionary: FieldType,
+    };
+
+    /// The type of field to use when serializing the type name of a structore or union as a Record.
+    type_name: Layout = .{ .record = .symbol },
+    /// List of types to use for each field. The length must match the number of fields in the structure.
+    fields: []const FieldType,
+};
 
 /// For testing: Double check we cleared all nested datas.
 fn expectCleanWriterState(self: *Writer) !void {
@@ -878,4 +989,49 @@ test "The Grand Menagerie (ocapn spec test data)" {
     try writer.write(&menagerie);
 
     try std.testing.expectEqualStrings(zoo_bin, output.written());
+}
+
+const MyStruct = struct {
+    const wire_format = WireFormat{
+        .type_name = .{ .record = .symbol },
+        .fields = &[_]FieldType{
+            .string,
+            .symbol,
+            .default,
+            .default,
+            .data,
+        },
+    };
+
+    name: []const u8,
+    id: []const u8,
+    age: i32,
+    description: []const u8,
+    image_data: []const u8,
+};
+
+test "wire format" {
+    const my_struct = MyStruct{
+        .name = "vivi",
+        .id = "vv",
+        .age = 35,
+        .description = "vivi is a human",
+        .image_data = &[_]u8{ 42, 45, 46 },
+    };
+
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    var writer = Writer.init(&output.writer, std.testing.allocator);
+    defer output.deinit();
+    defer writer.deinit();
+
+    try writer.write(&my_struct);
+
+    try std.testing.expectEqualStrings(
+        "<15\"Writer.MyStruct4\"vivi2'vv35+15\"vivi is a human3:" ++ .{
+            42,
+            45,
+            46,
+        } ++ ">",
+        output.written(),
+    );
 }

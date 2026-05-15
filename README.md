@@ -59,9 +59,15 @@ If we want to be able to convert raw Zig types effectively, we need a good way t
 One option could be to use a DBus-style wire format. If we specified such a string with a standard name, it could be used as a way to differentiate. Default could be string as that's the common case, but if it needs to be something more clever, we just add the wire format.
 
 ```zig
-// . = non-array, or string, s = symbol, d = data
 const Foo = struct {
-    const WireFormat = "..sd";
+    const wire_format = .{
+      .type_name = .{ .record = .symbol },
+      .fields = &[_]Field{
+          .string,
+          .default,
+          .symbol,
+          .data,
+    }};
 
     // A string
     name: []const u8,
