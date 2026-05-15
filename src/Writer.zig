@@ -163,25 +163,32 @@ fn writeWithFormat(self: *Writer, val: anytype, field_type: FieldType) !void {
                 const has_wire_format = @hasDecl(ValType, "wire_format");
 
                 if (has_wire_format) {
-                    // Verify wire format count matches field count
-                    if (ValType.wire_format.fields.len != structure.fields.len) {
-                        @compileError(std.fmt.comptimePrint("found wire_format declaration in {s}, but number of fields ({}) doesn't match the format length ({}).", .{ TypeName, structure.fields.len, ValType.wire_format.fields.len }));
+                    if (ValType.wire_format.fields) |field_types| {
+                        // Verify wire format count matches field count
+                        if (field_types.len != structure.fields.len) {
+                            @compileError(std.fmt.comptimePrint("found wire_format declaration in {s}, length of field type list ({}) doesn't match the number of fields ({}).", .{ TypeName, field_types.len, structure.fields.len }));
+                        }
                     }
                 }
 
-                if (!has_wire_format or ValType.wire_format.type_name == .record) {
+                if (!has_wire_format or ValType.wire_format.struct_type == .record) {
                     const record_label_type: FieldType = if (has_wire_format)
-                        ValType.wire_format.type_name.record
+                        ValType.wire_format.struct_type.record.field_type
                     else
                         .default;
 
-                    if (ValType.wire_format.type_name == .sequence) {
+                    if (ValType.wire_format.struct_type == .sequence) {
                         @compileError(TypeName ++ ": cannot use FieldType.sequence for a record's label. Only use it for fields.");
                     }
 
-                    try self.writeRecordStartWithType(TypeName, record_label_type);
+                    const type_name = if (has_wire_format)
+                        ValType.wire_format.struct_type.record.name orelse TypeName
+                    else
+                        TypeName;
+
+                    try self.writeRecordStartWithType(type_name, record_label_type);
                 } else {
-                    switch (ValType.wire_format.type_name) {
+                    switch (ValType.wire_format.struct_type) {
                         .sequence => try self.writeSequenceStart(),
                         .dictionary => try self.writeDictionaryStart(),
                         .record => {},
@@ -190,19 +197,19 @@ fn writeWithFormat(self: *Writer, val: anytype, field_type: FieldType) !void {
 
                 comptime var i = 0;
                 inline for (structure.fields) |Field| {
-                    const ft = if (has_wire_format) ValType.wire_format.fields[i] else .default;
+                    const ft = if (has_wire_format) if (ValType.wire_format.fields) |field_types| field_types[i] else .default else .default;
                     i += 1;
 
-                    if (ValType.wire_format.type_name == .dictionary) {
-                        try self.writeWithFormat(Field.name, ValType.wire_format.type_name.dictionary);
+                    if (ValType.wire_format.struct_type == .dictionary) {
+                        try self.writeWithFormat(Field.name, ValType.wire_format.struct_type.dictionary);
                     }
                     try self.writeWithFormat(@field(val, Field.name), ft);
                 }
 
-                if (!has_wire_format or ValType.wire_format.type_name == .record) {
+                if (!has_wire_format or ValType.wire_format.struct_type == .record) {
                     return self.writeRecordEnd();
                 } else {
-                    switch (ValType.wire_format.type_name) {
+                    switch (ValType.wire_format.struct_type) {
                         .sequence => return self.writeSequenceEnd(),
                         .dictionary => return self.writeDictionaryEnd(),
                         .record => {},
@@ -601,8 +608,13 @@ pub const FieldType = enum {
 pub const WireFormat = struct {
     /// The layout that a structure is serialized in.
     pub const Layout = union(enum) {
+        pub const RecordOptions = struct {
+            name: ?[]const u8 = null,
+            field_type: FieldType = .symbol,
+        };
+
         /// Serialize the structure as a Record, with the specified `FieldType` as the type of the record' label. The label's value will be the type name of the struct.
-        record: FieldType,
+        record: RecordOptions,
         /// Serialize the structure's fields as a sequence without emitting the structure's type name or the field names.
         sequence,
         /// Serialize the structure's fields as a dictionary without emitting the structure's type name. The specified `FieldType` is the type to use for each field's name.
@@ -610,9 +622,9 @@ pub const WireFormat = struct {
     };
 
     /// The type of field to use when serializing the type name of a structore or union as a Record.
-    type_name: Layout = .{ .record = .symbol },
+    struct_type: Layout = .{ .record = .{ .field_type = .symbol } },
     /// List of types to use for each field. The length must match the number of fields in the structure.
-    fields: []const FieldType,
+    fields: ?[]const FieldType = null,
 };
 
 /// For testing: Double check we cleared all nested datas.
@@ -1026,7 +1038,7 @@ test "The Grand Menagerie (ocapn spec test data)" {
 
 const MyStruct = struct {
     const wire_format = WireFormat{
-        .type_name = .{ .record = .string },
+        .struct_type = .{ .record = .{ .field_type = .string } },
         .fields = &[_]FieldType{
             .string,
             .symbol,
@@ -1070,4 +1082,66 @@ test "wire format" {
         } ++ "[42+69+67+]>",
         output.written(),
     );
+}
+
+const Zoo = struct {
+    const wire_format = WireFormat{
+        .struct_type = .{
+            .record = .{
+                .name = "zoo",
+                .field_type = .data,
+            },
+        },
+    };
+
+    const Animal = struct {
+        const wire_format = WireFormat{
+            .struct_type = .{ .dictionary = .symbol },
+            .fields = &[_]FieldType{
+                .data,
+                .string,
+                .default,
+                .default,
+                .default,
+            },
+        };
+
+        species: []const u8,
+        name: []const u8,
+        age: i32,
+        weight: f64,
+        @"alive?": bool,
+        // TODO: support for sets using std.hash_map
+        // eats: []const []const u8,
+    };
+
+    name: []const u8,
+    animals: []const Animal,
+};
+
+test "zig type menagerie" {
+    const zoo_bin = @embedFile("test-data/zoo.bin");
+
+    const menagerie = Zoo{
+        .name = "The Grand Menagerie",
+        .animals = &[_]Zoo.Animal{
+            .{
+                .species = "cat",
+                .name = "Tabatha",
+                .age = 12,
+                .weight = 8.2,
+                .@"alive?" = true,
+                // .eats = &[_][]const u8{ "mice", "fish", "kibble" },
+            },
+        },
+    };
+
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    var writer = Writer.init(&output.writer, std.testing.allocator);
+    defer output.deinit();
+    defer writer.deinit();
+
+    try writer.write(&menagerie);
+
+    try std.testing.expectEqualStrings(zoo_bin, output.written());
 }
