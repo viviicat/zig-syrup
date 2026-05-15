@@ -173,7 +173,7 @@ fn writeWithFormat(self: *Writer, val: anytype, field_type: FieldType) !void {
 
                 if (!has_wire_format or ValType.wire_format.layout == .record) {
                     const record_label_type: FieldType = if (has_wire_format)
-                        ValType.wire_format.layout.record.field_type
+                        ValType.wire_format.layout.record.label_type
                     else
                         .default;
 
@@ -606,11 +606,14 @@ pub const FieldType = enum {
 /// A structure that can be defined as a compile time constant in a structure with the name `wire_format`.
 /// This will be detected at compile time and used to determine the types to use when serializing bytes.
 pub const WireFormat = struct {
-    /// The layout that a structure is serialized in.
+    /// Structure for defining the layout for Zig struct when serialized to Syrup.
     pub const Layout = union(enum) {
+        /// Options for when a Zig struct is serialized as a Syrup Record.
         pub const RecordOptions = struct {
+            /// Name to use for the struct in the Record's label.
             name: ?[]const u8 = null,
-            field_type: FieldType = .symbol,
+            /// The type to use for the record's label.
+            label_type: FieldType = .symbol,
         };
 
         /// Serialize the structure as a Record, with the specified `FieldType` as the type of the record' label. The label's value will be the type name of the struct.
@@ -621,8 +624,8 @@ pub const WireFormat = struct {
         dictionary: FieldType,
     };
 
-    /// The type of field to use when serializing the type name of a structore or union as a Record.
-    layout: Layout = .{ .record = .{ .field_type = .symbol } },
+    /// The layout that the structure is serialized in.
+    layout: Layout = .{ .record = .{ .label_type = .symbol } },
     /// List of types to use for each field. The length must match the number of fields in the structure.
     fields: ?[]const FieldType = null,
 };
@@ -1038,7 +1041,7 @@ test "The Grand Menagerie (ocapn spec test data)" {
 
 const MyStruct = struct {
     const wire_format = WireFormat{
-        .layout = .{ .record = .{ .field_type = .string } },
+        .layout = .{ .record = .{ .label_type = .string } },
         .fields = &[_]FieldType{
             .string,
             .symbol,
@@ -1089,7 +1092,7 @@ const Zoo = struct {
         .layout = .{
             .record = .{
                 .name = "zoo",
-                .field_type = .data,
+                .label_type = .data,
             },
         },
     };
