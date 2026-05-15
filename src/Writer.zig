@@ -325,6 +325,13 @@ fn writeWithFieldType(self: *Writer, val: anytype, comptime field_type: FieldTyp
                             }
                             return self.writeSequenceEnd();
                         },
+                        .set => {
+                            try self.writeSetStart();
+                            for (slice) |item| {
+                                try self.writeWithFieldType(item, field_type.set.toFieldType());
+                            }
+                            return self.writeSetEnd();
+                        },
                         else => @compileError(std.fmt.comptimePrint("unsupported field type {s} for slice {s}. Dictionaries and sets cannot be safely serialized from slices due to non-uniqueness", .{ @tagName(field_type), @typeName(ValType) })),
                     }
                 },
@@ -1253,7 +1260,7 @@ const Zoo = struct {
         age: i32,
         weight: f64,
         @"alive?": bool,
-        eats: *const TestSet,
+        eats: []const []const u8,
     };
 
     name: []const u8,
@@ -1263,15 +1270,15 @@ const Zoo = struct {
 test "zig type menagerie" {
     const zoo_bin = @embedFile("test-data/zoo.bin");
 
-    const tabatha_eats = TestSet.initComptime(
-        &[_]TestKVSet{ .{"mice"}, .{"fish"}, .{"kibble"} },
-    );
-    const george_eats = TestSet.initComptime(
-        &[_]TestKVSet{ .{"bananas"}, .{"insects"} },
-    );
-    const casper_eats = TestSet.initComptime(
-        &[_]TestKVSet{},
-    );
+    //const tabatha_eats = TestSet.initComptime(
+    //    &[_]TestKVSet{ .{"mice"}, .{"fish"}, .{"kibble"} },
+    //);
+    //const george_eats = TestSet.initComptime(
+    //    &[_]TestKVSet{ .{"bananas"}, .{"insects"} },
+    //);
+    //const casper_eats = TestSet.initComptime(
+    //    &[_]TestKVSet{},
+    //);
 
     const menagerie = Zoo{
         .name = "The Grand Menagerie",
@@ -1282,7 +1289,7 @@ test "zig type menagerie" {
                 .age = 12,
                 .weight = 8.2,
                 .@"alive?" = true,
-                .eats = &tabatha_eats,
+                .eats = &.{ "mice", "fish", "kibble" },
             },
             .{
                 .species = "monkey",
@@ -1290,7 +1297,7 @@ test "zig type menagerie" {
                 .age = 6,
                 .weight = 17.24,
                 .@"alive?" = false,
-                .eats = &george_eats,
+                .eats = &.{ "bananas", "insects" },
             },
             .{
                 .species = "ghost",
@@ -1298,7 +1305,7 @@ test "zig type menagerie" {
                 .age = -12,
                 .weight = -34.5,
                 .@"alive?" = false,
-                .eats = &casper_eats,
+                .eats = &.{},
             },
         },
     };
@@ -1314,6 +1321,22 @@ test "zig type menagerie" {
 }
 
 // TODO!
-test "test struct with a non-static hashmap" {}
-test "test struct with a static dictionary hashmap" {}
-test "test struct with a non-static dictionary hashmap" {}
+test "non-static hashmap" {}
+test "static dictionary hashmap" {}
+test "non-static dictionary hashmap" {}
+
+test "zon to menagerie" {
+    const zoo_bin = @embedFile("test-data/zoo.bin");
+    const zoo_zon = @embedFile("test-data/zoo.zon");
+
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    var writer = Writer.init(&output.writer, std.testing.allocator);
+    defer output.deinit();
+    defer writer.deinit();
+
+    const menagerie = try std.zon.parse.fromSlice(Zoo, std.testing.allocator, zoo_zon, null, .{});
+    defer std.zon.parse.free(std.testing.allocator, menagerie);
+    try writer.write(&menagerie);
+
+    try std.testing.expectEqualStrings(zoo_bin, output.written());
+}
