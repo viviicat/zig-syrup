@@ -74,3 +74,4 @@ Zig Types that can be serialized to Syrup
 - [ ] **ZON to syrup conversion** - Zig's ZON format could possibly be converted to Syrup, if we so pleased.
 - [ ] **Serializing Zig structures** - Use comptime to convert Zig structs, slices, etc to Syrup format
 - [ ] **Fuzz testing** - Zig has fuzz testing support in the standard library we could play with.
+- [ ] **syrupify** - Add support for user function to transform zig struct
