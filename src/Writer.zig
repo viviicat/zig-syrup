@@ -993,7 +993,7 @@ test "The Grand Menagerie (ocapn spec test data)" {
 
 const MyStruct = struct {
     const wire_format = WireFormat{
-        .type_name = .{ .record = .symbol },
+        .type_name = .{ .record = .string },
         .fields = &[_]FieldType{
             .string,
             .symbol,
