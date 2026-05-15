@@ -51,24 +51,23 @@ Zig Types that can be serialized to Syrup
 - [x] integers (any length)
 - [x] f32
 - [x] f64
-- [ ] comptime integers
-- [ ] comptime f32
-- [ ] comptime f64
-- [ ] optionals
+- [x] comptime integers
+- [x] comptime float (as f64)
+- [x] optionals
 - [ ] enum literals
 - [x] arrays
-- [ ] slices (only slices of Value)
-- [ ] vectors
+- [x] slices (only slices of Value)
+- [x] vectors
 - [x] `[]const u8`
 - [x] structs 
-  - [ ] copies of structs (currently only struct pointers supported)
+  - [x] copies of structs (currently only struct pointers supported)
   - [x] as Record (label is the type name)
   - [x] as Sequence (just the field values)
   - [x] as Dictionary (key is the field name)
 - [ ] unions
 - [ ] tuples
 - [ ] error sets
-- [ ] general pointers
+- [x] general pointers
 
 # TODO
 
