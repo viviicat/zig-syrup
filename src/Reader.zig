@@ -567,7 +567,7 @@ fn expectNext(self: *Reader, expected_token: Token) !void {
     return expectEqualTokens(expected_token, try self.next());
 }
 
-test "primitive datatypes" {
+test "simple datatypes" {
     var io_reader = std.Io.Reader.fixed("f");
     var reader = Reader.init(std.testing.allocator, &io_reader);
     {
@@ -659,7 +659,7 @@ test "sequence datatype" {
     try expectNext(&reader, .sequence_end);
 }
 
-test "record datatype" {
+test init {
     var io_reader = std.Io.Reader.fixed("<[5\"hello2456+]tf13'dogs-and-cats>");
     var reader = Reader.init(std.testing.allocator, &io_reader);
     defer reader.deinit();
@@ -675,7 +675,7 @@ test "record datatype" {
     try expectNext(&reader, .record_end);
 }
 
-test "set datatype" {
+test "sets" {
     // Note that we do not validate set uniqueness - this would be difficult to do
     // without allocations. Could store a stack of sets, but it would make more sense
     // to validate when actually building structures instead of just returning tokens.
@@ -801,7 +801,7 @@ test "boundary string" {
     try expectNext(&reader, .{ .string = .{ .terminal = " a test" } });
 }
 
-test "allocation of strings" {
+test nextAlloc {
     var io_reader = std.testing.Reader.init(&read_buf, &.{
         .{ .buffer = "45\"hello this is" },
         .{ .buffer = " a test of the" },
