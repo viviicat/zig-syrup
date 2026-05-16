@@ -58,7 +58,7 @@ Zig Types that can be (de)serialized to Syrup
 - [x] optionals
 - [ ] enum literals
 - [x] arrays
-- [x] slices (only slices of Value)
+- [x] slices
 - [x] vectors
 - [x] `[]const u8`
 - [x] structs 
@@ -75,12 +75,10 @@ Zig Types that can be (de)serialized to Syrup
 - [ ] integers (any length)
 - [ ] f32
 - [ ] f64
-- [ ] comptime integers
-- [ ] comptime float (as f64)
 - [ ] optionals
 - [ ] enum literals
 - [ ] arrays
-- [ ] slices (only slices of Value)
+- [ ] slices
 - [ ] vectors
 - [ ] `[]const u8`
 - [ ] structs
@@ -89,7 +87,6 @@ Zig Types that can be (de)serialized to Syrup
   - [ ] as Dictionary (key is the field name)
 - [ ] unions
 - [ ] tuples
-- [ ] error sets
 - [ ] general pointers
 
 
