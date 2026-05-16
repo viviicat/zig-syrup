@@ -4,7 +4,7 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const mod = b.addModule("zig_syrup", .{
+    const mod = b.addModule("syrup", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
     });
@@ -16,7 +16,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "zig_syrup", .module = mod },
+                .{ .name = "syrup", .module = mod },
             },
         }),
     });

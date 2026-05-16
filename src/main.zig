@@ -1,5 +1,5 @@
 const std = @import("std");
-const zig_syrup = @import("zig_syrup");
+const syrup = @import("syrup");
 
 pub fn main() !void {
     // Prints to stderr, ignoring potential errors.
