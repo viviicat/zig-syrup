@@ -1,8 +1,13 @@
-const Record = @import("Record.zig");
 const Writer = @import("Writer.zig");
 
-// TODO: any way to make it generic for any size?
-pub const Integral = union(enum) {
+/// A record type for Syrup which contains a label and a list of fields.
+/// Use this with `Writer.write` and `Writer.writeRecord`.
+pub const Record = struct {
+    label: *const Value,
+    fields: []const Value,
+};
+
+const Integral = union(enum) {
     i32: i32,
     i64: i64,
     i128: i128,

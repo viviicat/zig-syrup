@@ -10,8 +10,9 @@
 const std = @import("std");
 
 const base32 = @import("base32.zig");
-const Value = @import("dynamic.zig").Value;
-const Record = @import("Record.zig");
+const dynamic = @import("dynamic.zig");
+const Value = dynamic.Value;
+const Record = dynamic.Record;
 const tags = @import("tags.zig");
 const CollectionMode = @import("collections.zig").CollectionMode;
 
