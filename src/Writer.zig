@@ -13,7 +13,7 @@ const print = std.debug.print;
 
 const Writer = @This();
 
-pub const ParsingError = error{
+const ParsingError = error{
     /// Tried to close the wrong type of nested item.
     NestingMismatch,
     /// Tried to end a record but we are not inside a record.
@@ -31,7 +31,8 @@ pub const ParsingError = error{
 };
 
 const FormatterError = std.Io.Writer.Error || std.Io.Reader.Error;
-const WritingError = ParsingError || FormatterError || std.mem.Allocator.Error;
+pub const FlatError = FormatterError || std.mem.Allocator.Error;
+pub const WritingError = ParsingError || FlatError;
 
 pub const VTable = struct {
     /// Write a boolean Syrup value.
@@ -79,7 +80,7 @@ pub const VTable = struct {
 };
 
 /// The default Syrup formatter (writes the syrup types to the writer)
-pub const Formatter = struct {
+const Formatter = struct {
     pub fn writeBoolean(writer: *std.Io.Writer, val: bool) FormatterError!void {
         if (val) {
             try writer.writeByte(tags.syrup.True);
@@ -112,7 +113,7 @@ pub const Formatter = struct {
     pub fn writeSymbol(writer: *std.Io.Writer, val: []const u8) FormatterError!void {
         try writeDataInternal(writer, val, tags.syrup.Symbol);
     }
-    fn writeDataInternal(writer: *std.Io.Writer, val: []const u8, sep: u8) !void {
+    fn writeDataInternal(writer: *std.Io.Writer, val: []const u8, sep: u8) FormatterError!void {
         try writer.printInt(val.len, 10, .lower, .{});
         try writer.writeByte(sep);
         try writer.writeAll(val);
@@ -150,7 +151,7 @@ pub const Formatter = struct {
 };
 
 /// Formatter for `jsyrup` which is a human readable form of Syrup not for the wire.
-pub const JSyrupFormatter = struct {
+const JSyrupFormatter = struct {
     pub fn writeBoolean(writer: *std.Io.Writer, val: bool) FormatterError!void {
         if (val) {
             try writer.writeAll(tags.jsyrup.True);
@@ -372,11 +373,11 @@ inline fn curWriter(self: *Writer) *std.Io.Writer {
 }
 
 /// Write a supported type.
-pub fn write(self: *Writer, val: anytype) !void {
+pub fn write(self: *Writer, val: anytype) WritingError!void {
     return self.writeWithFieldType(val, .default);
 }
 
-fn writeBytesWithType(self: *Writer, val: []const u8, field_type: FieldType) !void {
+fn writeBytesWithType(self: *Writer, val: []const u8, field_type: FieldType) FlatError!void {
     switch (field_type) {
         .string, .default => try self.writeString(val),
         .data => try self.writeData(val),
@@ -385,7 +386,7 @@ fn writeBytesWithType(self: *Writer, val: []const u8, field_type: FieldType) !vo
     }
 }
 
-fn writeRecordStartWithType(self: *Writer, val: []const u8, field_type: FieldType) !void {
+fn writeRecordStartWithType(self: *Writer, val: []const u8, field_type: FieldType) WritingError!void {
     const val_value = switch (field_type) {
         .string, .default => Value{ .string = val },
         .data => Value{ .data = val },
@@ -396,7 +397,7 @@ fn writeRecordStartWithType(self: *Writer, val: []const u8, field_type: FieldTyp
     try self.writeRecordStart(&val_value);
 }
 
-fn writeWithFieldType(self: *Writer, val: anytype, comptime field_type: FieldType) !void {
+fn writeWithFieldType(self: *Writer, val: anytype, comptime field_type: FieldType) WritingError!void {
     const ValType = @TypeOf(val);
     const val_info = @typeInfo(ValType);
 
@@ -616,7 +617,7 @@ fn writeWithFieldType(self: *Writer, val: anytype, comptime field_type: FieldTyp
 }
 
 /// Write a `Value`.
-pub fn writeValue(self: *Writer, gen: *const Value) !void {
+pub fn writeValue(self: *Writer, gen: *const Value) WritingError!void {
     return try switch (gen.*) {
         .true => self.writeBoolean(true),
         .false => self.writeBoolean(false),
@@ -638,13 +639,13 @@ pub fn writeValue(self: *Writer, gen: *const Value) !void {
 }
 
 /// Write a boolean value.
-pub fn writeBoolean(self: *Writer, val: bool) !void {
+pub fn writeBoolean(self: *Writer, val: bool) FlatError!void {
     try self.startWrite();
     try self.vtable.writeBoolean(self.curWriter(), val);
 }
 
 /// Write an integer value of any width.
-pub fn writeInt(self: *Writer, val: anytype) !void {
+pub fn writeInt(self: *Writer, val: anytype) FlatError!void {
     const ValType = @TypeOf(val);
     const ValInfo = @typeInfo(ValType);
     switch (ValInfo) {
@@ -667,45 +668,45 @@ pub fn writeInt(self: *Writer, val: anytype) !void {
 }
 
 /// Write a `f32` float.
-pub fn writeFloat(self: *Writer, val: f32) !void {
+pub fn writeFloat(self: *Writer, val: f32) FlatError!void {
     try self.startWrite();
     try self.vtable.writeFloat(self.curWriter(), val);
 }
 
 /// Write a `f64` float.
-pub fn writeDouble(self: *Writer, val: f64) !void {
+pub fn writeDouble(self: *Writer, val: f64) FlatError!void {
     try self.startWrite();
     try self.vtable.writeDouble(self.curWriter(), val);
 }
 
 /// Write a byte slice as data.
-pub fn writeData(self: *Writer, val: []const u8) !void {
+pub fn writeData(self: *Writer, val: []const u8) FlatError!void {
     try self.startWrite();
     try self.vtable.writeData(self.curWriter(), val);
 }
 
 /// Write a byte slice as a string.
-pub fn writeString(self: *Writer, val: []const u8) !void {
+pub fn writeString(self: *Writer, val: []const u8) FlatError!void {
     try self.startWrite();
     try self.vtable.writeString(self.curWriter(), val);
 }
 
 /// Write a byte slice as a symbol.
-pub fn writeSymbol(self: *Writer, val: []const u8) !void {
+pub fn writeSymbol(self: *Writer, val: []const u8) FlatError!void {
     try self.startWrite();
     try self.vtable.writeSymbol(self.curWriter(), val);
 }
 
 /// Begin writing a Sequence. The Sequence will be populated with subsequent writes.
 /// Call `writeSequenceEnd` to finish the Sequence.
-pub fn writeSequenceStart(self: *Writer) !void {
+pub fn writeSequenceStart(self: *Writer) FlatError!void {
     try self.startWrite();
     try self.vtable.writeSequenceStart(self.curWriter());
     try self.nested_datas.append(self.gpa, .{ .sequence = 0 });
 }
 
 /// Return the provided error if the expected nested item isn't the current parent.
-fn ensureProperNesting(self: *Writer, mode: CollectionMode, err: ParsingError) !void {
+fn ensureProperNesting(self: *Writer, mode: CollectionMode, err: ParsingError) WritingError!void {
     const data = self.nested_datas.pop() orelse return err;
     if (data != mode) {
         return error.NestingMismatch;
@@ -713,7 +714,7 @@ fn ensureProperNesting(self: *Writer, mode: CollectionMode, err: ParsingError) !
 }
 
 /// Finish writing a Sequence. Throws `SequenceUnderflow` if we aren't in any sequences.
-pub fn writeSequenceEnd(self: *Writer) !void {
+pub fn writeSequenceEnd(self: *Writer) WritingError!void {
     try self.ensureProperNesting(.sequence, error.SequenceUnderflow);
     try self.vtable.writeSequenceEnd(self.curWriter());
 }
@@ -729,7 +730,7 @@ pub fn writeSequence(self: *Writer, val: []const Value) WritingError!void {
 
 /// Begin writing a Record given a label. The Record will be populated with subsequent writes.
 /// Call `writeRecordEnd` to finish the Record.
-pub fn writeRecordStart(self: *Writer, label: *const Value) !void {
+pub fn writeRecordStart(self: *Writer, label: *const Value) WritingError!void {
     try self.startWrite();
     try self.vtable.writeRecordStart(self.curWriter());
     try self.nested_datas.append(self.gpa, .{ .record = 0 });
@@ -737,7 +738,7 @@ pub fn writeRecordStart(self: *Writer, label: *const Value) !void {
 }
 
 /// Finish writing a Record. Throws `RecordUnderflow` if we aren't in any records.
-pub fn writeRecordEnd(self: *Writer) !void {
+pub fn writeRecordEnd(self: *Writer) WritingError!void {
     try self.ensureProperNesting(.record, error.RecordUnderflow);
     try self.vtable.writeRecordEnd(self.curWriter());
 }
@@ -758,7 +759,7 @@ fn tmpWrittenLen(self: *Writer) usize {
 /// Begin writing a Dictionary of data. `tmp_writer` will be filled with subsequent writes of
 /// (alternately) keys and values, until the dictionary is complete.
 /// Call `writeDictionaryEnd` to finish the Dictionary.
-fn writeDictionaryStart(self: *Writer) !void {
+pub fn writeDictionaryStart(self: *Writer) FlatError!void {
     try self.startWrite();
     try self.vtable.writeDictionaryStart(self.curWriter());
     self.dict_or_set_depth += 1;
@@ -781,7 +782,7 @@ fn cmpIndices(data: *CompData, a: KeyValueIndices, b: KeyValueIndices) bool {
     return order == .lt;
 }
 
-fn sortIndices(self: *Writer, dict_data: *DictData) !void {
+fn sortIndices(self: *Writer, dict_data: *DictData) WritingError!void {
     var comp_data = CompData{ .buf = self.tmp_writer.written() };
     std.mem.sort(KeyValueIndices, dict_data.indices.items, &comp_data, cmpIndices);
     if (comp_data.found_duplicates) {
@@ -793,7 +794,7 @@ fn sortIndices(self: *Writer, dict_data: *DictData) !void {
 /// This sorts entries by key and then (unless we are still inside an outer Dictionary or Set) performs
 /// the actual flush of keys and values to the underlying writer, as previous calls will have
 /// only populated `tmp_writer` with items.
-fn writeDictionaryEnd(self: *Writer) !void {
+pub fn writeDictionaryEnd(self: *Writer) WritingError!void {
     // TODO: should we repair the state if we throw a NestingMismatch, or do we accept that the Writer
     // is now busted? For now, the writer state becomes jumbled.
     // I am leaning towards not caring, because the streaming nature of this means that it would be hard
@@ -826,7 +827,7 @@ fn finalizeDictData(
     self: *Writer,
     dict_data: *DictData,
     write_delimiter: *const fn (writer: *std.Io.Writer) WritingError!void,
-) !void {
+) WritingError!void {
     // Sort the indices by their buffer order!
     try self.sortIndices(dict_data);
 
@@ -883,7 +884,7 @@ pub fn writeDictionary(self: *Writer, val: []const Value) WritingError!void {
 /// Begin writing a Set of data. `tmp_writer` will be filled with subsequent writes of
 /// entries, until the set is complete.
 /// Call `writeSetEnd` to finish the Set.
-fn writeSetStart(self: *Writer) !void {
+pub fn writeSetStart(self: *Writer) WritingError!void {
     try self.startWrite();
     try self.vtable.writeSetStart(self.curWriter());
     self.dict_or_set_depth += 1;
@@ -894,7 +895,7 @@ fn writeSetStart(self: *Writer) !void {
 /// This sorts entries and then (unless we are still inside an outer Dictionary or Set) performs
 /// the actual flush of items to the underlying writer, as previous calls will have
 /// only populated `tmp_writer` with items.
-fn writeSetEnd(self: *Writer) !void {
+pub fn writeSetEnd(self: *Writer) WritingError!void {
     var nested_data = self.nested_datas.pop() orelse return error.SetUnderflow;
     if (nested_data != .set) {
         return error.NestingMismatch;
@@ -922,7 +923,7 @@ pub fn writeSet(self: *Writer, val: []const Value) WritingError!void {
 }
 
 /// Start a write operation. We record index positions if we are in a Dictionary or Set.
-fn startWrite(self: *Writer) !void {
+fn startWrite(self: *Writer) FlatError!void {
     if (self.nested_datas.items.len <= 0) {
         return;
     }
@@ -982,7 +983,7 @@ fn startWrite(self: *Writer) !void {
 }
 
 /// If we are no longer inside any dictionaries or sets, flush the temp buffer to the Io.Writer and clear the buffer.
-fn maybeFlushBuffer(self: *Writer) !void {
+fn maybeFlushBuffer(self: *Writer) WritingError!void {
     if (self.dict_or_set_depth == 0) {
         try self.underlying_writer.writeAll(self.tmp_writer.written());
         self.tmp_writer.clearRetainingCapacity();
