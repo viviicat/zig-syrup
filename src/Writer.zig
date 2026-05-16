@@ -1,5 +1,11 @@
 //! A writer for the Syrup data format. Can write all of the supported Syrup datatypes to an underlying
 //! `std.Io.Writer`.
+//!
+//! There are several supported options for writing:
+//! - Write `Value` types to represent a structure dynamically with `writeValue`.
+//! - Write primitives with the primitive methods like `writeString`, `writeBoolean`, etc.
+//! - Write all of the above, and also Zig types, with `write`
+//! - Write Syrup structures using the structural writing methods like `writeDictionary` and `writeSequence`.
 
 const std = @import("std");
 
