@@ -408,8 +408,6 @@ fn writeWithFieldType(self: *Writer, val: anytype, comptime field_type: FieldTyp
         bool => self.writeBoolean(val),
         f32 => self.writeFloat(val),
         f64 => self.writeDouble(val),
-        *const []Value => self.writeSequence(val),
-        *const []u8 => @compileError("use one of writeString, writeData, writeSymbol when writing bytes, or wrap it in a Value to specify its type."),
         else => switch (val_info) {
             .int => self.writeInt(val),
             .comptime_float => {
