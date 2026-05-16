@@ -24,6 +24,8 @@ const ParsingError = error{
     NestingMismatch,
     /// Tried to end a record but we are not inside a record.
     RecordUnderflow,
+    /// The record did not have a a label.
+    RecordMissingLabel,
     /// Tried to end a sequence but we are not inside a sequence.
     SequenceUnderflow,
     /// Tried to end a dictionary but we are not inside a dictionary.
@@ -521,7 +523,7 @@ fn writeWithFieldType(self: *Writer, val: anytype, comptime field_type: FieldTyp
                     else
                         TypeName;
 
-                    try self.writeRecordStartWithType(type_name, record_label_type);
+                    try self.writeRecordStartLabeledWithType(type_name, record_label_type);
                 } else {
                     switch (ValType.wire_format.layout) {
                         .sequence => try self.writeSequenceStart(),
@@ -706,6 +708,10 @@ fn ensureProperNesting(self: *Writer, mode: CollectionMode, err: ParsingError) W
     if (data != mode) {
         return error.NestingMismatch;
     }
+
+    if (data == .record and data.record == 0) {
+        return error.RecordMissingLabel;
+    }
 }
 
 /// Finish writing a Sequence. Throws `SequenceUnderflow` if we aren't in any sequences.
@@ -723,13 +729,21 @@ pub fn writeSequence(self: *Writer, val: []const Value) WritingError!void {
     try self.writeSequenceEnd();
 }
 
-/// Begin writing a Record given a label. The Record will be populated with subsequent writes.
+/// Begin writing a record. The next write will be the record's label.
 /// Call `writeRecordEnd` to finish the Record.
-pub fn writeRecordStart(self: *Writer, label: anytype) WritingError!void {
-    try self.writeRecordStartWithType(label, .default);
+pub fn writeRecordStart(self: *Writer) FlatError!void {
+    try self.startWrite();
+    try self.vtable.writeRecordStart(self.curWriter());
+    try self.nested_datas.append(self.gpa, .{ .record = 0 });
 }
 
-fn writeRecordStartWithType(self: *Writer, label: anytype, comptime field_type: FieldType) WritingError!void {
+/// Begin writing a Record given a label. The Record will be populated with subsequent writes.
+/// Call `writeRecordEnd` to finish the Record.
+pub fn writeRecordStartLabeled(self: *Writer, label: anytype) WritingError!void {
+    try self.writeRecordStartLabeledWithType(label, .default);
+}
+
+fn writeRecordStartLabeledWithType(self: *Writer, label: anytype, comptime field_type: FieldType) WritingError!void {
     try self.startWrite();
     try self.vtable.writeRecordStart(self.curWriter());
     try self.nested_datas.append(self.gpa, .{ .record = 0 });
@@ -744,7 +758,7 @@ pub fn writeRecordEnd(self: *Writer) WritingError!void {
 
 /// Write a full Record.
 pub fn writeRecord(self: *Writer, val: *const Record) WritingError!void {
-    try self.writeRecordStart(val.label);
+    try self.writeRecordStartLabeled(val.label);
     for (val.fields) |field| {
         try self.writeValue(&field);
     }
@@ -1179,7 +1193,37 @@ test writeRecordStart {
     defer output.deinit();
     defer writer.deinit();
 
-    try writer.writeRecordStart(Value{ .sequence = &[_]Value{
+    try writer.writeRecordStart();
+    try writer.writeSetStart();
+    try writer.writeString("hey there");
+    try writer.writeSetEnd();
+    try writer.writeBoolean(true);
+    try writer.writeBoolean(false);
+    try writer.writeSymbol("dogs-and-cats");
+    try writer.writeRecordEnd();
+
+    try std.testing.expectEqualStrings("<#9\"hey there$tf13'dogs-and-cats>", output.written());
+    try writer.expectCleanWriterState();
+}
+
+test "no record label causes error" {
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    var writer = Writer.init(&output.writer, std.testing.allocator);
+    defer output.deinit();
+    defer writer.deinit();
+
+    try writer.writeRecordStart();
+    try std.testing.expectError(error.RecordMissingLabel, writer.writeRecordEnd());
+    try writer.expectCleanWriterState();
+}
+
+test writeRecordStartLabeled {
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    var writer = Writer.init(&output.writer, std.testing.allocator);
+    defer output.deinit();
+    defer writer.deinit();
+
+    try writer.writeRecordStartLabeled(Value{ .sequence = &[_]Value{
         .{ .string = "hi" },
     } });
     try writer.writeBoolean(true);
