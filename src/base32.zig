@@ -26,8 +26,10 @@ const EncodeOptions = struct {
     include_pad: bool = false,
 };
 
+const Error = std.Io.Writer.Error || std.Io.Reader.Error;
+
 /// Read from `reader`, encode in base32, and write to `writer`.
-pub fn encode(reader: *std.Io.Reader, writer: *std.Io.Writer, options: EncodeOptions) !void {
+pub fn encode(reader: *std.Io.Reader, writer: *std.Io.Writer, options: EncodeOptions) Error!void {
     while (true) {
         const input = reader.take(5) catch |err| blk: switch (err) {
             error.ReadFailed => return error.ReadFailed,

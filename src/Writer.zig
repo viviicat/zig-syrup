@@ -2,6 +2,8 @@
 //! `std.Io.Writer`.
 
 const std = @import("std");
+
+const base32 = @import("base32.zig");
 const Value = @import("dynamic.zig").Value;
 const Record = @import("Record.zig");
 const tags = @import("tags.zig");
@@ -11,7 +13,7 @@ const print = std.debug.print;
 
 const Writer = @This();
 
-pub const WriterError = error{
+pub const ParsingError = error{
     /// Tried to close the wrong type of nested item.
     NestingMismatch,
     /// Tried to end a record but we are not inside a record.
@@ -28,7 +30,222 @@ pub const WriterError = error{
     SetUnderflow,
 };
 
-const WritingError = WriterError || std.Io.Writer.Error || std.mem.Allocator.Error;
+const FormatterError = std.Io.Writer.Error || std.Io.Reader.Error;
+const WritingError = ParsingError || FormatterError || std.mem.Allocator.Error;
+
+pub const VTable = struct {
+    /// Write a boolean Syrup value.
+    writeBoolean: *const fn (writer: *std.Io.Writer, val: bool) FormatterError!void,
+    /// Write a positive or negative integer value. The integer is passed as a string to allow for variable precision to pass through a function pointer. The string does not include the sign.
+    writeInt: *const fn (writer: *std.Io.Writer, val_str: []const u8, positive: bool) FormatterError!void,
+    /// Write a 32-bit floating point value.
+    writeFloat: *const fn (writer: *std.Io.Writer, val: f32) FormatterError!void,
+    /// Write a 64-bit floating point value.
+    writeDouble: *const fn (writer: *std.Io.Writer, val: f64) FormatterError!void,
+    /// Write a byte string as a syrup Data.
+    writeData: *const fn (writer: *std.Io.Writer, val: []const u8) FormatterError!void,
+    /// Write a byte string as a syrup String.
+    writeString: *const fn (writer: *std.Io.Writer, val: []const u8) FormatterError!void,
+    /// Write a byte string as a syrup Symbol.
+    writeSymbol: *const fn (writer: *std.Io.Writer, val: []const u8) FormatterError!void,
+    /// Begin a dictionary.
+    writeDictionaryStart: *const fn (writer: *std.Io.Writer) FormatterError!void,
+    /// Write a suffix after a dictionary key
+    writeDictionaryKeySuffix: *const fn (writer: *std.Io.Writer) FormatterError!void,
+    /// Write a delimiter between dictionary entries
+    writeDictionaryDelimiter: *const fn (writer: *std.Io.Writer) FormatterError!void,
+    /// End a dictionary.
+    writeDictionaryEnd: *const fn (writer: *std.Io.Writer) FormatterError!void,
+    /// Begin a sequence.
+    writeSequenceStart: *const fn (writer: *std.Io.Writer) FormatterError!void,
+    /// Write a delimiter between dictionary entries
+    writeSequenceDelimiter: *const fn (writer: *std.Io.Writer) FormatterError!void,
+    /// End a sequence.
+    writeSequenceEnd: *const fn (writer: *std.Io.Writer) FormatterError!void,
+    /// Begin a record.
+    writeRecordStart: *const fn (writer: *std.Io.Writer) FormatterError!void,
+    /// Write a suffix after the initial Record label.
+    writeRecordLabelSuffix: *const fn (writer: *std.Io.Writer) FormatterError!void,
+    /// Write a delimiter between dictionary entries
+    writeRecordDelimiter: *const fn (writer: *std.Io.Writer) FormatterError!void,
+    /// End a record.
+    writeRecordEnd: *const fn (writer: *std.Io.Writer) FormatterError!void,
+    /// Begin a set.
+    writeSetStart: *const fn (writer: *std.Io.Writer) FormatterError!void,
+    /// Write a delimiter between dictionary entries
+    writeSetDelimiter: *const fn (writer: *std.Io.Writer) FormatterError!void,
+    /// End a set.
+    writeSetEnd: *const fn (writer: *std.Io.Writer) FormatterError!void,
+};
+
+/// The default Syrup formatter (writes the syrup types to the writer)
+pub const Formatter = struct {
+    pub fn writeBoolean(writer: *std.Io.Writer, val: bool) FormatterError!void {
+        if (val) {
+            try writer.writeByte(tags.syrup.True);
+        } else {
+            try writer.writeByte(tags.syrup.False);
+        }
+    }
+    pub fn writeInt(writer: *std.Io.Writer, val_str: []const u8, positive: bool) FormatterError!void {
+        try writer.writeAll(val_str);
+        if (positive) {
+            try writer.writeByte(tags.syrup.int.Positive);
+        } else {
+            try writer.writeByte(tags.syrup.int.Negative);
+        }
+    }
+    pub fn writeFloat(writer: *std.Io.Writer, val: f32) FormatterError!void {
+        try writer.writeByte(tags.syrup.Float);
+        try writer.writeAll(&std.mem.toBytes(std.mem.nativeToBig(u32, @bitCast(val))));
+    }
+    pub fn writeDouble(writer: *std.Io.Writer, val: f64) FormatterError!void {
+        try writer.writeByte(tags.syrup.Double);
+        try writer.writeAll(&std.mem.toBytes(std.mem.nativeToBig(u64, @bitCast(val))));
+    }
+    pub fn writeData(writer: *std.Io.Writer, val: []const u8) FormatterError!void {
+        try writeDataInternal(writer, val, tags.syrup.Data);
+    }
+    pub fn writeString(writer: *std.Io.Writer, val: []const u8) FormatterError!void {
+        try writeDataInternal(writer, val, tags.syrup.String);
+    }
+    pub fn writeSymbol(writer: *std.Io.Writer, val: []const u8) FormatterError!void {
+        try writeDataInternal(writer, val, tags.syrup.Symbol);
+    }
+    fn writeDataInternal(writer: *std.Io.Writer, val: []const u8, sep: u8) !void {
+        try writer.printInt(val.len, 10, .lower, .{});
+        try writer.writeByte(sep);
+        try writer.writeAll(val);
+    }
+    pub fn writeDictionaryStart(writer: *std.Io.Writer) FormatterError!void {
+        try writer.writeByte(tags.syrup.dictionary.Start);
+    }
+    pub fn writeDictionaryKeySuffix(_: *std.Io.Writer) FormatterError!void {}
+    pub fn writeDictionaryDelimiter(_: *std.Io.Writer) FormatterError!void {}
+    pub fn writeDictionaryEnd(writer: *std.Io.Writer) FormatterError!void {
+        try writer.writeByte(tags.syrup.dictionary.End);
+    }
+    pub fn writeSequenceStart(writer: *std.Io.Writer) FormatterError!void {
+        try writer.writeByte(tags.syrup.sequence.Start);
+    }
+    pub fn writeSequenceDelimiter(_: *std.Io.Writer) FormatterError!void {}
+    pub fn writeSequenceEnd(writer: *std.Io.Writer) FormatterError!void {
+        try writer.writeByte(tags.syrup.sequence.End);
+    }
+    pub fn writeRecordStart(writer: *std.Io.Writer) FormatterError!void {
+        try writer.writeByte(tags.syrup.record.Start);
+    }
+    pub fn writeRecordLabelSuffix(_: *std.Io.Writer) FormatterError!void {}
+    pub fn writeRecordDelimiter(_: *std.Io.Writer) FormatterError!void {}
+    pub fn writeRecordEnd(writer: *std.Io.Writer) FormatterError!void {
+        try writer.writeByte(tags.syrup.record.End);
+    }
+    pub fn writeSetStart(writer: *std.Io.Writer) FormatterError!void {
+        try writer.writeByte(tags.syrup.set.Start);
+    }
+    pub fn writeSetDelimiter(_: *std.Io.Writer) FormatterError!void {}
+    pub fn writeSetEnd(writer: *std.Io.Writer) FormatterError!void {
+        try writer.writeByte(tags.syrup.set.End);
+    }
+};
+
+/// Formatter for `jsyrup` which is a human readable form of Syrup not for the wire.
+pub const JSyrupFormatter = struct {
+    pub fn writeBoolean(writer: *std.Io.Writer, val: bool) FormatterError!void {
+        if (val) {
+            try writer.writeAll(tags.jsyrup.True);
+        } else {
+            try writer.writeAll(tags.jsyrup.False);
+        }
+    }
+    pub fn writeInt(writer: *std.Io.Writer, val_str: []const u8, positive: bool) FormatterError!void {
+        if (!positive) {
+            try writer.writeByte(tags.jsyrup.NegativeInt);
+        }
+        try writer.writeAll(val_str);
+    }
+    pub fn writeFloat(writer: *std.Io.Writer, val: f32) FormatterError!void {
+        // Not precise!
+        try writer.printFloat(val, .{});
+    }
+    pub fn writeDouble(writer: *std.Io.Writer, val: f64) FormatterError!void {
+        // Not precise!
+        try writer.printFloat(val, .{});
+    }
+    pub fn writeData(writer: *std.Io.Writer, val: []const u8) FormatterError!void {
+        try writer.writeByte(tags.jsyrup.Data);
+        try base32.encodeSlice(val, writer, .{});
+        try writer.writeByte(tags.jsyrup.Data);
+    }
+    fn writeEscapedChar(writer: *std.Io.Writer, char: u8) FormatterError!void {
+        try writer.writeByte('\\');
+        try writer.writeByte(char);
+    }
+    pub fn writeString(writer: *std.Io.Writer, val: []const u8) FormatterError!void {
+        try writer.writeByte(tags.jsyrup.String);
+        var i: usize = 0;
+        while (i < val.len) : (i += 1) {
+            switch (val[i]) {
+                '"', '\\', '/', '\u{0008}', '\u{000C}', '\n', '\r', '\t' => try writeEscapedChar(writer, val[i]),
+                else => try writer.writeByte(val[i]),
+            }
+        }
+        try writer.writeByte(tags.jsyrup.String);
+    }
+    pub fn writeSymbol(writer: *std.Io.Writer, val: []const u8) FormatterError!void {
+        try writer.writeByte(tags.jsyrup.Symbol);
+        var i: usize = 0;
+        while (i < val.len) : (i += 1) {
+            switch (val[i]) {
+                '`', '\\', '/', '\u{0008}', '\u{000C}', '\n', '\r', '\t' => try writeEscapedChar(writer, val[i]),
+                else => try writer.writeByte(val[i]),
+            }
+        }
+        try writer.writeByte(tags.jsyrup.Symbol);
+    }
+    pub fn writeDictionaryStart(writer: *std.Io.Writer) FormatterError!void {
+        try writer.writeByte(tags.jsyrup.dictionary.Start);
+    }
+    pub fn writeDictionaryKeySuffix(writer: *std.Io.Writer) FormatterError!void {
+        try writer.writeAll(tags.jsyrup.dictionary.KeySuffix);
+    }
+    pub fn writeDictionaryDelimiter(writer: *std.Io.Writer) FormatterError!void {
+        try writer.writeAll(tags.jsyrup.Delimiter);
+    }
+    pub fn writeDictionaryEnd(writer: *std.Io.Writer) FormatterError!void {
+        try writer.writeByte(tags.jsyrup.dictionary.End);
+    }
+    pub fn writeSequenceStart(writer: *std.Io.Writer) FormatterError!void {
+        try writer.writeByte(tags.jsyrup.sequence.Start);
+    }
+    pub fn writeSequenceDelimiter(writer: *std.Io.Writer) FormatterError!void {
+        try writer.writeAll(tags.jsyrup.Delimiter);
+    }
+    pub fn writeSequenceEnd(writer: *std.Io.Writer) FormatterError!void {
+        try writer.writeByte(tags.jsyrup.sequence.End);
+    }
+    pub fn writeRecordStart(writer: *std.Io.Writer) FormatterError!void {
+        try writer.writeByte(tags.jsyrup.record.Start);
+    }
+    pub fn writeRecordLabelSuffix(writer: *std.Io.Writer) FormatterError!void {
+        try writer.writeByte(' ');
+    }
+    pub fn writeRecordDelimiter(writer: *std.Io.Writer) FormatterError!void {
+        try writer.writeAll(tags.jsyrup.Delimiter);
+    }
+    pub fn writeRecordEnd(writer: *std.Io.Writer) FormatterError!void {
+        try writer.writeByte(tags.jsyrup.record.End);
+    }
+    pub fn writeSetStart(writer: *std.Io.Writer) FormatterError!void {
+        try writer.writeByte(tags.jsyrup.set.Start);
+    }
+    pub fn writeSetDelimiter(writer: *std.Io.Writer) FormatterError!void {
+        try writer.writeAll(tags.jsyrup.Delimiter);
+    }
+    pub fn writeSetEnd(writer: *std.Io.Writer) FormatterError!void {
+        try writer.writeByte(tags.jsyrup.set.End);
+    }
+};
 
 /// Structure to store the indices for entries of a Dictionary or Set.
 const KeyValueIndices = struct {
@@ -48,8 +265,10 @@ const DictData = struct {
 };
 
 const NestedData = union(CollectionMode) {
-    sequence: void,
-    record: void,
+    /// Store the index of the sequence
+    sequence: usize,
+    /// Store the index of the record (inclusive of the initial, which is the label)
+    record: usize,
     dictionary: DictData,
     set: DictData,
 
@@ -61,6 +280,7 @@ const NestedData = union(CollectionMode) {
     }
 };
 
+vtable: *const VTable,
 /// The underlying `std.Io.Writer`.
 underlying_writer: *std.Io.Writer,
 /// Allocator to use for the temporary memory
@@ -72,12 +292,67 @@ nested_datas: std.ArrayList(NestedData) = .empty,
 /// The depth we are traversing inside a dictionary or set, so we know when we can flush the temp buffer.
 dict_or_set_depth: usize = 0,
 
-/// Initialize a `Writer`.
+/// Initialize a `Writer` that writes to `syrup` format.
 pub fn init(underlying_writer: *std.Io.Writer, gpa: std.mem.Allocator) Writer {
     return .{
         .underlying_writer = underlying_writer,
         .gpa = gpa,
         .tmp_writer = std.Io.Writer.Allocating.init(gpa),
+        .vtable = &.{
+            .writeBoolean = Formatter.writeBoolean,
+            .writeInt = Formatter.writeInt,
+            .writeFloat = Formatter.writeFloat,
+            .writeDouble = Formatter.writeDouble,
+            .writeData = Formatter.writeData,
+            .writeString = Formatter.writeString,
+            .writeSymbol = Formatter.writeSymbol,
+            .writeDictionaryStart = Formatter.writeDictionaryStart,
+            .writeDictionaryKeySuffix = Formatter.writeDictionaryKeySuffix,
+            .writeDictionaryDelimiter = Formatter.writeDictionaryDelimiter,
+            .writeDictionaryEnd = Formatter.writeDictionaryEnd,
+            .writeSequenceStart = Formatter.writeSequenceStart,
+            .writeSequenceEnd = Formatter.writeSequenceEnd,
+            .writeSequenceDelimiter = Formatter.writeSequenceDelimiter,
+            .writeRecordStart = Formatter.writeRecordStart,
+            .writeRecordLabelSuffix = Formatter.writeRecordLabelSuffix,
+            .writeRecordDelimiter = Formatter.writeRecordDelimiter,
+            .writeRecordEnd = Formatter.writeRecordEnd,
+            .writeSetStart = Formatter.writeSetStart,
+            .writeSetDelimiter = Formatter.writeSetDelimiter,
+            .writeSetEnd = Formatter.writeSetEnd,
+        },
+    };
+}
+
+/// Initialize a `Writer` that writes to `jsyrup` format instead of `syrup`.
+pub fn initJSyrup(underlying_writer: *std.Io.Writer, gpa: std.mem.Allocator) Writer {
+    return .{
+        .underlying_writer = underlying_writer,
+        .gpa = gpa,
+        .tmp_writer = std.Io.Writer.Allocating.init(gpa),
+        .vtable = &.{
+            .writeBoolean = JSyrupFormatter.writeBoolean,
+            .writeInt = JSyrupFormatter.writeInt,
+            .writeFloat = JSyrupFormatter.writeFloat,
+            .writeDouble = JSyrupFormatter.writeDouble,
+            .writeData = JSyrupFormatter.writeData,
+            .writeString = JSyrupFormatter.writeString,
+            .writeSymbol = JSyrupFormatter.writeSymbol,
+            .writeDictionaryStart = JSyrupFormatter.writeDictionaryStart,
+            .writeDictionaryKeySuffix = JSyrupFormatter.writeDictionaryKeySuffix,
+            .writeDictionaryDelimiter = JSyrupFormatter.writeDictionaryDelimiter,
+            .writeDictionaryEnd = JSyrupFormatter.writeDictionaryEnd,
+            .writeSequenceStart = JSyrupFormatter.writeSequenceStart,
+            .writeSequenceEnd = JSyrupFormatter.writeSequenceEnd,
+            .writeSequenceDelimiter = JSyrupFormatter.writeSequenceDelimiter,
+            .writeRecordStart = JSyrupFormatter.writeRecordStart,
+            .writeRecordLabelSuffix = JSyrupFormatter.writeRecordLabelSuffix,
+            .writeRecordDelimiter = JSyrupFormatter.writeRecordDelimiter,
+            .writeRecordEnd = JSyrupFormatter.writeRecordEnd,
+            .writeSetStart = JSyrupFormatter.writeSetStart,
+            .writeSetDelimiter = JSyrupFormatter.writeSetDelimiter,
+            .writeSetEnd = JSyrupFormatter.writeSetEnd,
+        },
     };
 }
 
@@ -367,11 +642,7 @@ pub fn writeValue(self: *Writer, gen: *const Value) !void {
 /// Write a boolean value.
 pub fn writeBoolean(self: *Writer, val: bool) !void {
     try self.startWrite();
-    if (val) {
-        try self.curWriter().writeByte(tags.True);
-    } else {
-        try self.curWriter().writeByte(tags.False);
-    }
+    try self.vtable.writeBoolean(self.curWriter(), val);
 }
 
 /// Write an integer value of any width.
@@ -379,67 +650,64 @@ pub fn writeInt(self: *Writer, val: anytype) !void {
     const ValType = @TypeOf(val);
     const ValInfo = @typeInfo(ValType);
     switch (ValInfo) {
-        .int => {},
+        .int => |i| {
+            if (i.bits > 3400) {
+                @compileError(std.fmt.comptimePrint(
+                    "That integer is... very big ({} bits > 3400) so it doesn't fit in the buffer. Do we need to support this? it's freakin' huge, man!",
+                    .{i.bits},
+                ));
+            }
+        },
         .comptime_int => {},
         else => @compileError("writeInt must be called with integer type."),
     }
 
     try self.startWrite();
-    if (val >= 0) {
-        try self.curWriter().printInt(val, 10, .lower, .{});
-        try self.curWriter().writeByte(tags.PositiveInt);
-    } else {
-        try self.curWriter().printInt(-val, 10, .lower, .{});
-        try self.curWriter().writeByte(tags.NegativeInt);
-    }
+    var buf: [1024]u8 = undefined;
+    const len = std.fmt.printInt(&buf, @abs(val), 10, .lower, .{});
+    try self.vtable.writeInt(self.curWriter(), buf[0..len], val >= 0);
 }
 
 /// Write a `f32` float.
 pub fn writeFloat(self: *Writer, val: f32) !void {
     try self.startWrite();
-    try self.curWriter().writeByte(tags.Float);
-    try self.curWriter().writeAll(&std.mem.toBytes(std.mem.nativeToBig(u32, @bitCast(val))));
+    try self.vtable.writeFloat(self.curWriter(), val);
 }
 
 /// Write a `f64` float.
 pub fn writeDouble(self: *Writer, val: f64) !void {
     try self.startWrite();
-    try self.curWriter().writeByte(tags.Double);
-    try self.curWriter().writeAll(&std.mem.toBytes(std.mem.nativeToBig(u64, @bitCast(val))));
+    try self.vtable.writeDouble(self.curWriter(), val);
 }
 
 /// Write a byte slice as data.
 pub fn writeData(self: *Writer, val: []const u8) !void {
-    try self.writeDataInternal(val, tags.Data);
+    try self.startWrite();
+    try self.vtable.writeData(self.curWriter(), val);
 }
 
 /// Write a byte slice as a string.
 pub fn writeString(self: *Writer, val: []const u8) !void {
-    try self.writeDataInternal(val, tags.String);
+    try self.startWrite();
+    try self.vtable.writeString(self.curWriter(), val);
 }
 
 /// Write a byte slice as a symbol.
 pub fn writeSymbol(self: *Writer, val: []const u8) !void {
-    try self.writeDataInternal(val, tags.Symbol);
-}
-
-fn writeDataInternal(self: *Writer, val: []const u8, sep: u8) !void {
     try self.startWrite();
-    try self.curWriter().printInt(val.len, 10, .lower, .{});
-    try self.curWriter().writeByte(sep);
-    try self.curWriter().writeAll(val);
+    try self.vtable.writeSymbol(self.curWriter(), val);
 }
 
 /// Begin writing a Sequence. The Sequence will be populated with subsequent writes.
 /// Call `writeSequenceEnd` to finish the Sequence.
 pub fn writeSequenceStart(self: *Writer) !void {
     try self.startWrite();
-    try self.curWriter().writeByte(tags.StartSequence);
-    try self.nested_datas.append(self.gpa, .sequence);
+    try self.vtable.writeSequenceStart(self.curWriter());
+    try self.nested_datas.append(self.gpa, .{ .sequence = 0 });
 }
 
 /// Return the provided error if the expected nested item isn't the current parent.
-fn ensureProperNesting(self: *Writer, mode: CollectionMode, err: WriterError) !void {
+fn ensureProperNesting(self: *Writer, mode: CollectionMode, err: ParsingError) !void {
     const data = self.nested_datas.pop() orelse return err;
     if (data != mode) {
         return error.NestingMismatch;
@@ -449,7 +717,7 @@ fn ensureProperNesting(self: *Writer, mode: CollectionMode, err: WriterError) !v
 /// Finish writing a Sequence. Throws `SequenceUnderflow` if we aren't in any sequences.
 pub fn writeSequenceEnd(self: *Writer) !void {
     try self.ensureProperNesting(.sequence, error.SequenceUnderflow);
-    try self.curWriter().writeByte(tags.EndSequence);
+    try self.vtable.writeSequenceEnd(self.curWriter());
 }
 
 /// Write a full Sequence given a list of `Value`.
@@ -465,15 +733,15 @@ pub fn writeSequence(self: *Writer, val: []const Value) WritingError!void {
 /// Call `writeRecordEnd` to finish the Record.
 pub fn writeRecordStart(self: *Writer, label: *const Value) !void {
     try self.startWrite();
-    try self.curWriter().writeByte(tags.StartRecord);
-    try self.nested_datas.append(self.gpa, .record);
+    try self.vtable.writeRecordStart(self.curWriter());
+    try self.nested_datas.append(self.gpa, .{ .record = 0 });
     try self.writeValue(label);
 }
 
 /// Finish writing a Record. Throws `RecordUnderflow` if we aren't in any records.
 pub fn writeRecordEnd(self: *Writer) !void {
     try self.ensureProperNesting(.record, error.RecordUnderflow);
-    try self.curWriter().writeByte(tags.EndRecord);
+    try self.vtable.writeRecordEnd(self.curWriter());
 }
 
 /// Write a full Record.
@@ -494,7 +762,7 @@ fn tmpWrittenLen(self: *Writer) usize {
 /// Call `writeDictionaryEnd` to finish the Dictionary.
 fn writeDictionaryStart(self: *Writer) !void {
     try self.startWrite();
-    try self.curWriter().writeByte(tags.StartDictionary);
+    try self.vtable.writeDictionaryStart(self.curWriter());
     self.dict_or_set_depth += 1;
     try self.nested_datas.append(self.gpa, .{ .dictionary = .{ .start_index = self.tmpWrittenLen() } });
 }
@@ -549,36 +817,57 @@ fn writeDictionaryEnd(self: *Writer) !void {
         last.end = self.tmpWrittenLen();
     }
 
-    try self.finalizeDictData(&nested_data.dictionary);
+    try self.finalizeDictData(&nested_data.dictionary, self.vtable.writeDictionaryDelimiter);
 
-    try self.curWriter().writeByte(tags.EndDictionary);
+    try self.vtable.writeDictionaryEnd(self.curWriter());
 }
 
 /// Given the dictionary data, finalize it by sorting by keys and putting the sorted bytes into the
 /// right position in the buffer.
-fn finalizeDictData(self: *Writer, dict_data: *DictData) !void {
+fn finalizeDictData(
+    self: *Writer,
+    dict_data: *DictData,
+    write_delimiter: *const fn (writer: *std.Io.Writer) WritingError!void,
+) !void {
     // Sort the indices by their buffer order!
     try self.sortIndices(dict_data);
 
     // Ensure we can fit a copy of the data after the current data.
-    const start_i = dict_data.start_index;
-    const end_i = self.tmpWrittenLen();
-    const collection_len = end_i - start_i;
-    try self.tmp_writer.ensureUnusedCapacity(collection_len);
+    const orig_start_i = dict_data.start_index;
+    const orig_end_i = self.tmpWrittenLen();
+    const orig_collection_len = orig_end_i - orig_start_i;
 
-    const tmp_buffer = self.tmp_writer.writer.buffer;
+    // XXX: If we have delimiters (jsyrup), the added delimiters might require extra capacity, but we don't
+    // have a way to know the space used by them currently, so we might need a little more capacity than this.
+    // See below additional ensure.
+    try self.tmp_writer.ensureUnusedCapacity(orig_collection_len);
+
+    var i: usize = 0;
     for (dict_data.indices.items) |item| {
-        // Because we ensured capacity above, this will never realloc, so the buffer won't invalidate.
-        // Ideally there'd be a way to write while ensuring no reallocs, but that's asking too much
-        // of Allocating.Writer.
-        try self.tmp_writer.writer.writeAll(tmp_buffer[item.key..item.end]);
+        if (i > 0) {
+            try write_delimiter(self.curWriter());
+        }
+
+        // Now that we added the delimiter for the previous entry, we need to ensure there's enough space
+        // to copy, so that the temp buffer doesn't get invalidated mid_copy as the memory is shared.
+        try self.tmp_writer.ensureUnusedCapacity(item.end - item.key);
+        try self.tmp_writer.writer.writeAll(self.tmp_writer.writer.buffer[item.key..item.end]);
+
+        i += 1;
     }
 
     // Copy from the now-ordered portion back to the final position.
-    @memcpy(tmp_buffer[start_i..end_i], tmp_buffer[collection_len + start_i .. collection_len + end_i]);
+    // Note that the regions may overlap due to the added length of the delimiters, hence @memmove.
+    const tmp_buffer = self.tmp_writer.writer.buffer;
+    const final_end = self.tmpWrittenLen();
+    const resized_len = final_end - orig_end_i;
+    @memmove(
+        tmp_buffer[orig_start_i .. orig_start_i + resized_len],
+        tmp_buffer[orig_start_i + orig_collection_len .. final_end],
+    );
 
     // Rewind the buffer now that we've copied back to the original position.
-    self.tmp_writer.shrinkRetainingCapacity(end_i);
+    self.tmp_writer.shrinkRetainingCapacity(orig_start_i + resized_len);
 
     self.dict_or_set_depth -= 1;
     try self.maybeFlushBuffer();
@@ -598,7 +887,7 @@ pub fn writeDictionary(self: *Writer, val: []const Value) WritingError!void {
 /// Call `writeSetEnd` to finish the Set.
 fn writeSetStart(self: *Writer) !void {
     try self.startWrite();
-    try self.curWriter().writeByte(tags.StartSet);
+    try self.vtable.writeSetStart(self.curWriter());
     self.dict_or_set_depth += 1;
     try self.nested_datas.append(self.gpa, .{ .set = .{ .start_index = self.tmpWrittenLen() } });
 }
@@ -621,8 +910,8 @@ fn writeSetEnd(self: *Writer) !void {
 
     defer nested_data.deinit(self.gpa);
 
-    try self.finalizeDictData(&nested_data.set);
-    try self.curWriter().writeByte(tags.EndSet);
+    try self.finalizeDictData(&nested_data.set, self.vtable.writeSetDelimiter);
+    try self.vtable.writeSetEnd(self.curWriter());
 }
 
 /// Write a full Set given a list of `Value`.
@@ -640,6 +929,10 @@ fn startWrite(self: *Writer) !void {
         return;
     }
 
+    // Info on delimiters (jsyrup specific)
+    // Dictionaries and Sets: Don't write delimiters here, we need to do that after sorting.
+    // (we don't know which items need delimiters and which are the first or last entries)
+    // Records and sequences: We write the delimiters as we go.
     const last_nested_data = &self.nested_datas.items[self.nested_datas.items.len - 1];
     switch (last_nested_data.*) {
         .dictionary => |*dict_data| {
@@ -647,6 +940,8 @@ fn startWrite(self: *Writer) !void {
                 var cur = &dict_data.indices.items[dict_data.indices.items.len - 1];
                 if (cur.value == 0) {
                     // Value index is still zero, so we are writing the value now.
+                    // But first we gotta write the key suffix.
+                    try self.vtable.writeDictionaryKeySuffix(self.curWriter());
                     cur.value = self.tmpWrittenLen();
                     return;
                 } else {
@@ -667,7 +962,24 @@ fn startWrite(self: *Writer) !void {
 
             try dict_data.indices.append(self.gpa, .{ .key = self.tmpWrittenLen() });
         },
-        else => {},
+        .record => |*i| {
+            if (i.* == 1) {
+                // First entry is the label, and gets a LabelSuffix *after* it
+                try self.vtable.writeRecordLabelSuffix(self.curWriter());
+            } else if (i.* > 0) {
+                // The rest get a delimiter.
+                try self.vtable.writeRecordDelimiter(self.curWriter());
+            }
+
+            i.* += 1;
+        },
+        .sequence => |*i| {
+            if (i.* > 0) {
+                try self.vtable.writeSequenceDelimiter(self.curWriter());
+            }
+
+            i.* += 1;
+        },
     }
 }
 
@@ -777,6 +1089,8 @@ fn expectCleanWriterState(self: *Writer) !void {
     try std.testing.expectEqual(0, self.nested_datas.items.len);
     try std.testing.expectEqual(0, self.dict_or_set_depth);
 }
+
+const zoo_bin = @embedFile("test-data/zoo.bin");
 
 test "basic datatype" {
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
@@ -1109,8 +1423,6 @@ test "detection of mismatched nesting levels" {
 }
 
 test "The Grand Menagerie (ocapn spec test data)" {
-    const zoo_bin = @embedFile("test-data/zoo.bin");
-
     const menagerie = Value{
         .record = .{
             .label = &.{ .data = "zoo" },
@@ -1268,7 +1580,6 @@ const Zoo = struct {
 };
 
 test "zig type menagerie" {
-    const zoo_bin = @embedFile("test-data/zoo.bin");
 
     //const tabatha_eats = TestSet.initComptime(
     //    &[_]TestKVSet{ .{"mice"}, .{"fish"}, .{"kibble"} },
@@ -1327,7 +1638,6 @@ test "non-static dictionary hashmap" {}
 
 test "zon to menagerie" {
     // TODO: lots of copies of this embedded file lol
-    const zoo_bin = @embedFile("test-data/zoo.bin");
     const zoo_zon = @embedFile("test-data/zoo.zon");
 
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
@@ -1340,4 +1650,81 @@ test "zon to menagerie" {
     try writer.write(&menagerie);
 
     try std.testing.expectEqualStrings(zoo_bin, output.written());
+}
+
+test "small buffer/resize to catch realloc bugs" {}
+
+// Begin tests for JSyrup
+
+const zoo_jsyrup = @embedFile("test-data/zoo.jsyrup");
+
+test "Grand Menagerie in JSyrup" {
+    const menagerie = Value{
+        .record = .{
+            .label = &.{ .data = "zoo" },
+            .fields = &[_]Value{
+                .{ .string = "The Grand Menagerie" },
+                .{ .sequence = &[_]Value{
+                    .{ .dictionary = &[_]Value{
+                        .{ .symbol = "species" },
+                        .{ .data = "cat" },
+                        .{ .symbol = "name" },
+                        .{ .string = "Tabatha" },
+                        .{ .symbol = "age" },
+                        .{ .int = .{ .i32 = 12 } },
+                        .{ .symbol = "weight" },
+                        .{ .f64 = 8.2 },
+                        .{ .symbol = "alive?" },
+                        .true,
+                        .{ .symbol = "eats" },
+                        .{ .set = &[_]Value{
+                            .{ .data = "mice" },
+                            .{ .data = "fish" },
+                            .{ .data = "kibble" },
+                        } },
+                    } },
+                    .{ .dictionary = &[_]Value{
+                        .{ .symbol = "species" },
+                        .{ .data = "monkey" },
+                        .{ .symbol = "name" },
+                        .{ .string = "George" },
+                        .{ .symbol = "age" },
+                        .{ .int = .{ .i32 = 6 } },
+                        .{ .symbol = "weight" },
+                        .{ .f64 = 17.24 },
+                        .{ .symbol = "alive?" },
+                        .false,
+                        .{ .symbol = "eats" },
+                        .{ .set = &[_]Value{
+                            .{ .data = "bananas" },
+                            .{ .data = "insects" },
+                        } },
+                    } },
+                    .{ .dictionary = &[_]Value{
+                        .{ .symbol = "species" },
+                        .{ .data = "ghost" },
+                        .{ .symbol = "name" },
+                        .{ .string = "Casper" },
+                        .{ .symbol = "age" },
+                        .{ .int = .{ .i32 = -12 } },
+                        .{ .symbol = "weight" },
+                        .{ .f64 = -34.5 },
+                        .{ .symbol = "alive?" },
+                        .false,
+                        .{ .symbol = "eats" },
+                        .{ .set = &[0]Value{} },
+                    } },
+                } },
+            },
+        },
+    };
+
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    var writer = Writer.initJSyrup(&output.writer, std.testing.allocator);
+    defer output.deinit();
+    defer writer.deinit();
+
+    try writer.write(&menagerie);
+
+    try std.testing.expectEqualStrings(zoo_jsyrup, output.written());
 }

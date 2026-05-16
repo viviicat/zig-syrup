@@ -97,8 +97,9 @@ Zig Types that can be (de)serialized to Syrup
 
 - [x] **ZON to syrup conversion** - Zig's ZON format could possibly be converted to Syrup, if we so pleased.
 - [x] **Serializing Zig structures** - Use comptime to convert Zig structs, slices, etc to Syrup format
+- [ ] **Profiling** - compare to Guile version
 - [ ] **Fuzz testing** - Zig has fuzz testing support in the standard library we could play with.
-- [ ] **`jsyrup` support** - human readable syrup format
+- [x] **`jsyrup` support** - human readable syrup format
 - [ ] **syrupify** - Add support for user function to transform zig struct
 - [ ] **`libsyrup`** - a C API for the low level syrup serialization
-- [ ] **CLI tool** - to quickly pretty-print syrup structure and convert to jsyrup (maybe from jsyrup, though I think that's non-deterministic due to floats), unsure if converting ZON to syrup is useful here without type information, maybe it's possible/useful.
+- [ ] **CLI tool** - to quickly pretty-print syrup structure and convert to jsyrup, unsure if converting ZON to syrup is useful here without type information, maybe it's possible/useful.
