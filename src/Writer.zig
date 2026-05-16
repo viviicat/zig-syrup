@@ -897,7 +897,7 @@ pub fn writeDictionary(self: *Writer, val: []const Value) WritingError!void {
 /// Begin writing a Set of data. `tmp_writer` will be filled with subsequent writes of
 /// entries, until the set is complete.
 /// Call `writeSetEnd` to finish the Set.
-pub fn writeSetStart(self: *Writer) WritingError!void {
+pub fn writeSetStart(self: *Writer) FlatError!void {
     try self.startWrite();
     try self.vtable.writeSetStart(self.curWriter());
     self.dict_or_set_depth += 1;
