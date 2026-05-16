@@ -2,7 +2,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
-const tags = @import("tags.zig");
+const tags = @import("tags.zig").syrup;
 const CollectionMode = @import("collections.zig").CollectionMode;
 
 const Reader = @This();
@@ -219,48 +219,48 @@ pub fn next(self: *Reader) NextError!Token {
                             return .{ .f64 = parseFloatValue(f64, self.takeValueSlice()) };
                         }
                     },
-                    tags.StartSequence => {
+                    tags.sequence.Start => {
                         try self.collection_stack.append(self.gpa, .sequence);
                         self.cursor += 1;
                         return .sequence_start;
                     },
-                    tags.EndSequence => {
+                    tags.sequence.End => {
                         if (self.collection_stack.pop() != .sequence) {
                             return Error.SyntaxError;
                         }
                         self.cursor += 1;
                         return .sequence_end;
                     },
-                    tags.StartRecord => {
+                    tags.record.Start => {
                         try self.collection_stack.append(self.gpa, .record);
                         self.cursor += 1;
                         return .record_start;
                     },
-                    tags.EndRecord => {
+                    tags.record.End => {
                         if (self.collection_stack.pop() != .record) {
                             return Error.SyntaxError;
                         }
                         self.cursor += 1;
                         return .record_end;
                     },
-                    tags.StartSet => {
+                    tags.set.Start => {
                         try self.collection_stack.append(self.gpa, .set);
                         self.cursor += 1;
                         return .set_start;
                     },
-                    tags.EndSet => {
+                    tags.set.End => {
                         if (self.collection_stack.pop() != .set) {
                             return Error.SyntaxError;
                         }
                         self.cursor += 1;
                         return .set_end;
                     },
-                    tags.StartDictionary => {
+                    tags.dictionary.Start => {
                         try self.collection_stack.append(self.gpa, .dictionary);
                         self.cursor += 1;
                         return .dictionary_start;
                     },
-                    tags.EndDictionary => {
+                    tags.dictionary.End => {
                         if (self.collection_stack.pop() != .dictionary) {
                             return Error.SyntaxError;
                         }
@@ -281,13 +281,13 @@ pub fn next(self: *Reader) NextError!Token {
                     const byte = try self.expectByte();
                     switch (byte) {
                         '0'...'9' => continue,
-                        tags.PositiveInt => {
+                        tags.int.Positive => {
                             self.state = .value;
                             const val = self.takeValueSlice();
                             self.cursor += 1;
                             return Token{ .positive_integer = .{ .terminal = val } };
                         },
-                        tags.NegativeInt => {
+                        tags.int.Negative => {
                             self.state = .value;
                             const val = self.takeValueSlice();
                             self.cursor += 1;
