@@ -19,28 +19,31 @@ const print = std.debug.print;
 
 const Writer = @This();
 
-const ParsingError = error{
-    /// Tried to close the wrong type of nested item.
-    NestingMismatch,
+const UnderflowError = error{
     /// Tried to end a record but we are not inside a record.
     RecordUnderflow,
-    /// The record did not have a a label.
-    RecordMissingLabel,
     /// Tried to end a sequence but we are not inside a sequence.
     SequenceUnderflow,
     /// Tried to end a dictionary but we are not inside a dictionary.
     DictionaryUnderflow,
-    /// Tried to end a dictionary immediately after adding a key, without a corresponding value
-    DictionaryMissingValue,
-    /// At least one duplicate entry was found in the dictionary or set.
-    DuplicateEntryFound,
     /// Tried to end a set but we are not inside any sets.
     SetUnderflow,
 };
 
+const ParsingError = error{
+    /// Tried to close the wrong type of nested item.
+    NestingMismatch,
+    /// The record did not have a a label.
+    RecordMissingLabel,
+    /// Tried to end a dictionary immediately after adding a key, without a corresponding value
+    DictionaryMissingValue,
+    /// At least one duplicate entry was found in the dictionary or set.
+    DuplicateEntryFound,
+};
+
 const FormatterError = std.Io.Writer.Error || std.Io.Reader.Error;
 pub const FlatError = FormatterError || std.mem.Allocator.Error;
-pub const WritingError = ParsingError || FlatError;
+pub const WritingError = UnderflowError || ParsingError || FlatError;
 
 pub const VTable = struct {
     /// Write a boolean Syrup value.
@@ -702,8 +705,10 @@ pub fn writeSequenceStart(self: *Writer) FlatError!void {
     try self.nested_datas.append(self.gpa, .{ .sequence = 0 });
 }
 
+const NestingError = error{ NestingMismatch, RecordMissingLabel } || UnderflowError;
+
 /// Return the provided error if the expected nested item isn't the current parent.
-fn ensureProperNesting(self: *Writer, mode: CollectionMode, err: ParsingError) WritingError!void {
+fn ensureProperNesting(self: *Writer, mode: CollectionMode, err: UnderflowError) NestingError!void {
     const data = self.nested_datas.pop() orelse return err;
     if (data != mode) {
         return error.NestingMismatch;
@@ -714,8 +719,10 @@ fn ensureProperNesting(self: *Writer, mode: CollectionMode, err: ParsingError) W
     }
 }
 
+pub const SequenceError = FormatterError || NestingError || std.mem.Allocator.Error;
+
 /// Finish writing a Sequence. Throws `SequenceUnderflow` if we aren't in any sequences.
-pub fn writeSequenceEnd(self: *Writer) WritingError!void {
+pub fn writeSequenceEnd(self: *Writer) SequenceError!void {
     try self.ensureProperNesting(.sequence, error.SequenceUnderflow);
     try self.vtable.writeSequenceEnd(self.curWriter());
 }
@@ -750,8 +757,10 @@ fn writeRecordStartLabeledWithType(self: *Writer, label: anytype, comptime field
     try self.writeWithFieldType(label, field_type);
 }
 
+pub const RecordError = FormatterError || NestingError || std.mem.Allocator.Error;
+
 /// Finish writing a Record. Throws `RecordUnderflow` if we aren't in any records.
-pub fn writeRecordEnd(self: *Writer) WritingError!void {
+pub fn writeRecordEnd(self: *Writer) RecordError!void {
     try self.ensureProperNesting(.record, error.RecordUnderflow);
     try self.vtable.writeRecordEnd(self.curWriter());
 }
@@ -795,7 +804,8 @@ fn cmpIndices(data: *CompData, a: KeyValueIndices, b: KeyValueIndices) bool {
     return order == .lt;
 }
 
-fn sortIndices(self: *Writer, dict_data: *DictData) WritingError!void {
+pub const SortingError = FormatterError || error{DuplicateEntryFound};
+fn sortIndices(self: *Writer, dict_data: *DictData) SortingError!void {
     var comp_data = CompData{ .buf = self.tmp_writer.written() };
     std.mem.sort(KeyValueIndices, dict_data.indices.items, &comp_data, cmpIndices);
     if (comp_data.found_duplicates) {
@@ -803,11 +813,12 @@ fn sortIndices(self: *Writer, dict_data: *DictData) WritingError!void {
     }
 }
 
+pub const DictionaryError = FormatterError || DictDataError || error{ NestingMismatch, DictionaryUnderflow, DictionaryMissingValue };
 /// Finish writing a Dictionary. Throws `DictionaryUnderflow` if we aren't in any dictionaries.
 /// This sorts entries by key and then (unless we are still inside an outer Dictionary or Set) performs
 /// the actual flush of keys and values to the underlying writer, as previous calls will have
 /// only populated `tmp_writer` with items.
-pub fn writeDictionaryEnd(self: *Writer) WritingError!void {
+pub fn writeDictionaryEnd(self: *Writer) DictionaryError!void {
     // TODO: should we repair the state if we throw a NestingMismatch, or do we accept that the Writer
     // is now busted? For now, the writer state becomes jumbled.
     // I am leaning towards not caring, because the streaming nature of this means that it would be hard
@@ -834,13 +845,14 @@ pub fn writeDictionaryEnd(self: *Writer) WritingError!void {
     try self.vtable.writeDictionaryEnd(self.curWriter());
 }
 
+const DictDataError = FormatterError || SortingError || std.mem.Allocator.Error;
 /// Given the dictionary data, finalize it by sorting by keys and putting the sorted bytes into the
 /// right position in the buffer.
 fn finalizeDictData(
     self: *Writer,
     dict_data: *DictData,
-    write_delimiter: *const fn (writer: *std.Io.Writer) WritingError!void,
-) WritingError!void {
+    write_delimiter: *const fn (writer: *std.Io.Writer) FormatterError!void,
+) DictDataError!void {
     // Sort the indices by their buffer order!
     try self.sortIndices(dict_data);
 
@@ -904,11 +916,12 @@ pub fn writeSetStart(self: *Writer) FlatError!void {
     try self.nested_datas.append(self.gpa, .{ .set = .{ .start_index = self.tmpWrittenLen() } });
 }
 
+pub const SetError = FormatterError || error{ DuplicateEntryFound, NestingMismatch, SetUnderflow } || std.mem.Allocator.Error;
 /// Finish writing a Set. Throws `SetUnderflow` if we aren't in any sets.
 /// This sorts entries and then (unless we are still inside an outer Dictionary or Set) performs
 /// the actual flush of items to the underlying writer, as previous calls will have
 /// only populated `tmp_writer` with items.
-pub fn writeSetEnd(self: *Writer) WritingError!void {
+pub fn writeSetEnd(self: *Writer) SetError!void {
     var nested_data = self.nested_datas.pop() orelse return error.SetUnderflow;
     if (nested_data != .set) {
         return error.NestingMismatch;
@@ -996,7 +1009,7 @@ fn startWrite(self: *Writer) FlatError!void {
 }
 
 /// If we are no longer inside any dictionaries or sets, flush the temp buffer to the Io.Writer and clear the buffer.
-fn maybeFlushBuffer(self: *Writer) WritingError!void {
+fn maybeFlushBuffer(self: *Writer) FormatterError!void {
     if (self.dict_or_set_depth == 0) {
         try self.underlying_writer.writeAll(self.tmp_writer.written());
         self.tmp_writer.clearRetainingCapacity();
