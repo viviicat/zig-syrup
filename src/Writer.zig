@@ -392,17 +392,6 @@ fn writeBytesWithType(self: *Writer, val: []const u8, field_type: FieldType) Fla
     }
 }
 
-fn writeRecordStartWithType(self: *Writer, val: []const u8, field_type: FieldType) WritingError!void {
-    const val_value = switch (field_type) {
-        .string, .default => Value{ .string = val },
-        .data => Value{ .data = val },
-        .symbol => Value{ .symbol = val },
-        .sequence, .set, .dictionary => unreachable,
-    };
-
-    try self.writeRecordStart(&val_value);
-}
-
 fn writeWithFieldType(self: *Writer, val: anytype, comptime field_type: FieldType) WritingError!void {
     const ValType = @TypeOf(val);
     const val_info = @typeInfo(ValType);
@@ -736,11 +725,15 @@ pub fn writeSequence(self: *Writer, val: []const Value) WritingError!void {
 
 /// Begin writing a Record given a label. The Record will be populated with subsequent writes.
 /// Call `writeRecordEnd` to finish the Record.
-pub fn writeRecordStart(self: *Writer, label: *const Value) WritingError!void {
+pub fn writeRecordStart(self: *Writer, label: anytype) WritingError!void {
+    try self.writeRecordStartWithType(label, .default);
+}
+
+fn writeRecordStartWithType(self: *Writer, label: anytype, comptime field_type: FieldType) WritingError!void {
     try self.startWrite();
     try self.vtable.writeRecordStart(self.curWriter());
     try self.nested_datas.append(self.gpa, .{ .record = 0 });
-    try self.writeValue(label);
+    try self.writeWithFieldType(label, field_type);
 }
 
 /// Finish writing a Record. Throws `RecordUnderflow` if we aren't in any records.
@@ -1177,6 +1170,24 @@ test "sequence datatype" {
 
     try writer.write(&sequence);
     try std.testing.expectEqualStrings("[6\"a test45+5'shark[170141183460469231731687303715884105690-15\"testing nesting]]", output.written());
+    try writer.expectCleanWriterState();
+}
+
+test writeRecordStart {
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    var writer = Writer.init(&output.writer, std.testing.allocator);
+    defer output.deinit();
+    defer writer.deinit();
+
+    try writer.writeRecordStart(Value{ .sequence = &[_]Value{
+        .{ .string = "hi" },
+    } });
+    try writer.writeBoolean(true);
+    try writer.writeBoolean(false);
+    try writer.writeSymbol("dogs-and-cats");
+    try writer.writeRecordEnd();
+
+    try std.testing.expectEqualStrings("<[2\"hi]tf13'dogs-and-cats>", output.written());
     try writer.expectCleanWriterState();
 }
 
