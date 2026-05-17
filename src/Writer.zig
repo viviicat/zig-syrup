@@ -755,7 +755,7 @@ fn writeRecordStartLabeledWithType(self: *Writer, label: anytype, comptime field
     try self.startWrite();
     try self.vtable.writeRecordStart(self.curWriter());
     try self.nested_datas.append(self.gpa, .{ .record = 0 });
-    try self.writeWithFieldType(label, field_type);
+    try self.writeWithFieldType(label, if (field_type == .default) .symbol else field_type);
 }
 
 pub const RecordError = FormatterError || NestingError || std.mem.Allocator.Error;
@@ -1456,7 +1456,8 @@ test "complex set" {
     };
 
     try writer.write(&set);
-    try std.testing.expectEqualStrings(
+    try std.testing.expectEqualSlices(
+        u8,
         "#2342356+3'one{#3\"hey5\"there$8\"stranger4:boop" ++
             "D" ++ .{ 64, 88, 255, 239, 157, 178, 45, 14 } ++
             "D" ++ .{ 64, 80, 254, 184, 81, 235, 133, 31 } ++
@@ -1564,10 +1565,15 @@ test "The Grand Menagerie (ocapn spec test data)" {
 
     try writer.write(&menagerie);
 
-    try std.testing.expectEqualStrings(zoo_bin, output.written());
+    try std.testing.expectEqualSlices(u8, zoo_bin, output.written());
 }
 
 const MyStruct = struct {
+    const Coord = struct {
+        lat: f64,
+        lon: f64,
+    };
+
     const wire_format = WireFormat{
         .layout = .{ .record = .{ .label = .string } },
         .fields = &[_]FieldType{
@@ -1577,6 +1583,7 @@ const MyStruct = struct {
             .default,
             .data,
             .sequence,
+            .default,
         },
     };
 
@@ -1586,6 +1593,7 @@ const MyStruct = struct {
     description: []const u8,
     image_data: []const u8,
     favorite_numbers: [3]i64,
+    location: Coord,
 };
 
 test "wire format" {
@@ -1596,6 +1604,7 @@ test "wire format" {
         .description = "vivi is a human",
         .image_data = &[_]u8{ 42, 45, 46 },
         .favorite_numbers = [_]i64{ 42, 69, 67 },
+        .location = .{ .lat = 45.238, .lon = 923.1239929 },
     };
 
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
@@ -1605,12 +1614,16 @@ test "wire format" {
 
     try writer.write(&my_struct);
 
-    try std.testing.expectEqualStrings(
+    try std.testing.expectEqualSlices(
+        u8,
         "<15\"Writer.MyStruct4\"vivi2'vv35+15\"vivi is a human3:" ++ .{
             42,
             45,
             46,
-        } ++ "[42+69+67+]>",
+        } ++ "[42+69+67+]<21'Writer.MyStruct.Coord" ++
+            "D" ++ .{ 64, 70, 158, 118, 200, 180, 57, 88 } ++
+            "D" ++ .{ 64, 140, 216, 253, 239, 253, 83, 125 } ++
+            ">>",
         output.written(),
     );
 }
@@ -1702,7 +1715,7 @@ test "zig type menagerie" {
 
     try writer.write(&menagerie);
 
-    try std.testing.expectEqualStrings(zoo_bin, output.written());
+    try std.testing.expectEqualSlices(u8, zoo_bin, output.written());
 }
 
 // TODO!
@@ -1711,7 +1724,6 @@ test "static dictionary hashmap" {}
 test "non-static dictionary hashmap" {}
 
 test "zon to menagerie" {
-    // TODO: lots of copies of this embedded file lol
     const zoo_zon = @embedFile("test-data/zoo.zon");
 
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
@@ -1723,7 +1735,7 @@ test "zon to menagerie" {
     defer std.zon.parse.free(std.testing.allocator, menagerie);
     try writer.write(&menagerie);
 
-    try std.testing.expectEqualStrings(zoo_bin, output.written());
+    try std.testing.expectEqualSlices(u8, zoo_bin, output.written());
 }
 
 test "small buffer/resize to catch realloc bugs" {}
