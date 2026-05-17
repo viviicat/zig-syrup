@@ -1,10 +1,12 @@
+# zig-syrup
+
 This is a partially-implemented Zig Syrup implementation.
 
 This library still needs work, and hasn't been checked for security issues. Use at your own risk.
 
 See [The Syrup Specification](https://github.com/ocapn/syrup/blob/master/draft-specification.md) for details.
 
-# Documentation
+## Documentation
 
 I'll probably add some build script for this, but for now, to browse documentation:
 
@@ -12,9 +14,9 @@ I'll probably add some build script for this, but for now, to browse documentati
 2. `python -m http.server 8080 -d docs/` (or some other similar minimal web server)
 3. Go to [localhost:8080](http://localhost:8080) (idk why i'm even explaining this)
 
-# Implemented data types
+## Implemented data types
 
-## Reader
+### Reader
 
 - [x] Booleans
 - [x] Floats
@@ -29,7 +31,7 @@ I'll probably add some build script for this, but for now, to browse documentati
 - [x] Records
 - [x] Sets
 
-## Writer
+### Writer
 
 - [x] Booleans
 - [x] Floats
@@ -89,8 +91,11 @@ Zig Types that can be (de)serialized to Syrup
 - [ ] tuples
 - [ ] general pointers
 
+## Benchmark
 
-# TODO
+There is a benchmarking tool available at [zig-syrup-benchmark](https://codeberg.org/vivicat/zig-syrup-benchmark). This also serves an example of how to add the Syrup library to a project.
+
+## TODO
 
 - [x] **ZON to syrup conversion** - Zig's ZON format could possibly be converted to Syrup, if we so pleased.
 - [x] **Serializing Zig structures** - Use comptime to convert Zig structs, slices, etc to Syrup format
@@ -101,3 +106,4 @@ Zig Types that can be (de)serialized to Syrup
 - [ ] **syrupify** - Add support for user function to transform zig struct
 - [ ] **`libsyrup`** - a C API for the low level syrup serialization
 - [ ] **CLI tool** - to quickly pretty-print syrup structure and convert to jsyrup, unsure if converting ZON to syrup is useful here without type information, maybe it's possible/useful.
+
