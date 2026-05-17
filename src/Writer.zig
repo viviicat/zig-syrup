@@ -3,7 +3,7 @@
 //!
 //! There are several supported options for writing:
 //! - Write `Value` types to represent a structure dynamically with `writeValue`.
-//! - Write primitives with the primitive methods like `writeString`, `writeBoolean`, etc.
+//! - Write primitives with the primitive methods like `writeString`, `writeBool`, etc.
 //! - Write all of the above, and also Zig types, with `write`
 //! - Write Syrup structures using the structural writing methods like `writeDictionary` and `writeSequence`.
 
@@ -48,7 +48,7 @@ pub const WritingError = UnderflowError || ParsingError || FlatError;
 
 pub const VTable = struct {
     /// Write a boolean Syrup value.
-    writeBoolean: *const fn (writer: *std.Io.Writer, val: bool) FormatterError!void,
+    writeBool: *const fn (writer: *std.Io.Writer, val: bool) FormatterError!void,
     /// Write a positive or negative integer value. The integer is passed as a string to allow for variable precision to pass through a function pointer. The string does not include the sign.
     writeInt: *const fn (writer: *std.Io.Writer, val_str: []const u8, positive: bool) FormatterError!void,
     /// Write a 32-bit floating point value.
@@ -93,7 +93,7 @@ pub const VTable = struct {
 
 /// The default Syrup formatter (writes the syrup types to the writer)
 const Formatter = struct {
-    pub fn writeBoolean(writer: *std.Io.Writer, val: bool) FormatterError!void {
+    pub fn writeBool(writer: *std.Io.Writer, val: bool) FormatterError!void {
         if (val) {
             try writer.writeByte(tags.syrup.True);
         } else {
@@ -164,7 +164,7 @@ const Formatter = struct {
 
 /// Formatter for `jsyrup` which is a human readable form of Syrup not for the wire.
 const JSyrupFormatter = struct {
-    pub fn writeBoolean(writer: *std.Io.Writer, val: bool) FormatterError!void {
+    pub fn writeBool(writer: *std.Io.Writer, val: bool) FormatterError!void {
         if (val) {
             try writer.writeAll(tags.jsyrup.True);
         } else {
@@ -312,7 +312,7 @@ pub fn init(underlying_writer: *std.Io.Writer, gpa: std.mem.Allocator) Writer {
         .gpa = gpa,
         .tmp_writer = std.Io.Writer.Allocating.init(gpa),
         .vtable = &.{
-            .writeBoolean = Formatter.writeBoolean,
+            .writeBool = Formatter.writeBool,
             .writeInt = Formatter.writeInt,
             .writeFloat = Formatter.writeFloat,
             .writeDouble = Formatter.writeDouble,
@@ -344,7 +344,7 @@ pub fn initJSyrup(underlying_writer: *std.Io.Writer, gpa: std.mem.Allocator) Wri
         .gpa = gpa,
         .tmp_writer = std.Io.Writer.Allocating.init(gpa),
         .vtable = &.{
-            .writeBoolean = JSyrupFormatter.writeBoolean,
+            .writeBool = JSyrupFormatter.writeBool,
             .writeInt = JSyrupFormatter.writeInt,
             .writeFloat = JSyrupFormatter.writeFloat,
             .writeDouble = JSyrupFormatter.writeDouble,
@@ -407,7 +407,7 @@ fn writeWithFieldType(self: *Writer, val: anytype, comptime field_type: FieldTyp
         *const Value => self.writeValue(val),
         Record => self.writeRecord(val),
         *const Record => self.writeRecord(val),
-        bool => self.writeBoolean(val),
+        bool => self.writeBool(val),
         f32 => self.writeFloat(val),
         f64 => self.writeDouble(val),
         else => switch (val_info) {
@@ -420,7 +420,7 @@ fn writeWithFieldType(self: *Writer, val: anytype, comptime field_type: FieldTyp
                 @compileError("comptime float cannot be converted to f64");
             },
             .comptime_int => self.writeInt(val),
-            .null => self.writeBoolean(false),
+            .null => self.writeBool(false),
             .optional => {
                 if (val) |payload| {
                     return self.writeWithFieldType(payload, field_type);
@@ -620,8 +620,8 @@ fn writeWithFieldType(self: *Writer, val: anytype, comptime field_type: FieldTyp
 /// Write a `Value`.
 pub fn writeValue(self: *Writer, gen: *const Value) WritingError!void {
     return try switch (gen.*) {
-        .true => self.writeBoolean(true),
-        .false => self.writeBoolean(false),
+        .true => self.writeBool(true),
+        .false => self.writeBool(false),
         .f32 => |val| self.writeFloat(val),
         .f64 => |val| self.writeDouble(val),
         .data => |val| self.writeData(val),
@@ -640,9 +640,9 @@ pub fn writeValue(self: *Writer, gen: *const Value) WritingError!void {
 }
 
 /// Write a boolean value.
-pub fn writeBoolean(self: *Writer, val: bool) FlatError!void {
+pub fn writeBool(self: *Writer, val: bool) FlatError!void {
     try self.startWrite();
-    try self.vtable.writeBoolean(self.curWriter(), val);
+    try self.vtable.writeBool(self.curWriter(), val);
 }
 
 /// Write an integer value of any width.
@@ -1218,8 +1218,8 @@ test writeRecordStart {
     try writer.writeSetStart();
     try writer.writeString("hey there");
     try writer.writeSetEnd();
-    try writer.writeBoolean(true);
-    try writer.writeBoolean(false);
+    try writer.writeBool(true);
+    try writer.writeBool(false);
     try writer.writeSymbol("dogs-and-cats");
     try writer.writeRecordEnd();
 
@@ -1247,8 +1247,8 @@ test writeRecordStartLabeled {
     try writer.writeRecordStartLabeled(Value{ .sequence = &[_]Value{
         .{ .string = "hi" },
     } });
-    try writer.writeBoolean(true);
-    try writer.writeBoolean(false);
+    try writer.writeBool(true);
+    try writer.writeBool(false);
     try writer.writeSymbol("dogs-and-cats");
     try writer.writeRecordEnd();
 
