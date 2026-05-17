@@ -1110,6 +1110,13 @@ pub const WireFormat = struct {
     fields: ?[]const FieldType = null,
 };
 
+/// While not strictly necessary, this function acts as an assertion that all nested structures have been written properly. Run it when the structure is done being written.
+pub fn finish(self: *Writer) error{NotFinished}!void {
+    if (self.nested_datas.items.len > 0) {
+        return error.NotFinished;
+    }
+}
+
 /// For testing: Double check we cleared all nested datas.
 fn expectCleanWriterState(self: *Writer) !void {
     try std.testing.expectEqual(0, self.nested_datas.items.len);
