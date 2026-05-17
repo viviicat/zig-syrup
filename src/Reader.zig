@@ -30,6 +30,7 @@ pub const NextError = std.Io.Reader.Error ||
 
 /// Union for determining where a complete integer bytestring is stored.
 pub const Integer = union(enum) {
+    /// This is the end of the data.
     /// The data is stored in the buffer and will be invalidated upon further parsing.
     buffered: []const u8,
     /// The data is stored in separately-allocated memory and can be used after further parsing.
@@ -38,9 +39,11 @@ pub const Integer = union(enum) {
 
 /// Union for determining where data, strings, symbols are being stored.
 pub const Data = union(enum) {
-    /// The data is stored in the buffer and will be invalidated upon further parsing.
+    /// This is the end of the data. Memory is not separately-allocated.
     buffered: []const u8,
-    /// The bytes do not contain the end of the data. At least one more BytesType will be returned with more data. This field of the union is only returned if you are using the non-allocating `next`.
+    /// This is not the end of the data. At least one more `Data` will be returned with more.
+    /// This field of the union is only returned if you are using the non-allocating `next`.
+    /// Memory is not separately-allocated.
     buffered_partial: []const u8,
     /// The data is stored in separately-allocated memory and can be used after further parsing.
     allocated: []const u8,
@@ -306,6 +309,14 @@ fn nextInternal(self: *Reader) NextError!Token {
                         self.value_start = self.cursor;
                         self.cursor += 1;
                         self.state = .decimal;
+
+                        if (self.cursor == self.input.len) {
+                            // dang, we ran out of input before even getting to .decimal.
+                            // Throw it in scratch!
+                            self.boundary_scratch[0] = byte;
+                            self.written_to_scratch = 1;
+                        }
+
                         continue :state_loop;
                     },
                     else => return Error.SyntaxError,
@@ -802,14 +813,14 @@ test "sequence datatype" {
     var reader = Reader.init(std.testing.allocator, &io_reader);
     defer reader.deinit();
 
-    try expectNext(&reader, .sequence_start);
-    try expectNext(&reader, .{ .string = .{ .buffered = "a test" } });
-    try expectNext(&reader, .{ .positive_integer = .{ .buffered = "45" } });
-    try expectNext(&reader, .{ .symbol = .{ .buffered = "shark" } });
-    try expectNext(&reader, .sequence_start);
-    try expectNext(&reader, .{ .negative_integer = .{ .buffered = "170141183460469231731687303715884105690" } });
-    try expectNext(&reader, .{ .string = .{ .buffered = "testing nesting" } });
-    try expectNext(&reader, .sequence_end);
+    try reader.expectNext(.sequence_start);
+    try reader.expectNext(.{ .string = .{ .buffered = "a test" } });
+    try reader.expectNext(.{ .positive_integer = .{ .buffered = "45" } });
+    try reader.expectNext(.{ .symbol = .{ .buffered = "shark" } });
+    try reader.expectNext(.sequence_start);
+    try reader.expectNext(.{ .negative_integer = .{ .buffered = "170141183460469231731687303715884105690" } });
+    try reader.expectNext(.{ .string = .{ .buffered = "testing nesting" } });
+    try reader.expectNext(.sequence_end);
     try expectLast(&reader, .sequence_end);
 }
 
@@ -818,14 +829,14 @@ test init {
     var reader = Reader.init(std.testing.allocator, &io_reader);
     defer reader.deinit();
 
-    try expectNext(&reader, .record_start);
-    try expectNext(&reader, .sequence_start);
-    try expectNext(&reader, .{ .string = .{ .buffered = "hello" } });
-    try expectNext(&reader, .{ .positive_integer = .{ .buffered = "2456" } });
-    try expectNext(&reader, .sequence_end);
-    try expectNext(&reader, .true);
-    try expectNext(&reader, .false);
-    try expectNext(&reader, .{ .symbol = .{ .buffered = "dogs-and-cats" } });
+    try reader.expectNext(.record_start);
+    try reader.expectNext(.sequence_start);
+    try reader.expectNext(.{ .string = .{ .buffered = "hello" } });
+    try reader.expectNext(.{ .positive_integer = .{ .buffered = "2456" } });
+    try reader.expectNext(.sequence_end);
+    try reader.expectNext(.true);
+    try reader.expectNext(.false);
+    try reader.expectNext(.{ .symbol = .{ .buffered = "dogs-and-cats" } });
     try expectLast(&reader, .record_end);
 }
 
@@ -837,14 +848,14 @@ test "sets" {
     var reader = Reader.init(std.testing.allocator, &io_reader);
     defer reader.deinit();
 
-    try expectNext(&reader, .set_start);
-    try expectNext(&reader, .sequence_start);
-    try expectNext(&reader, .{ .string = .{ .buffered = "hello" } });
-    try expectNext(&reader, .{ .positive_integer = .{ .buffered = "2456" } });
-    try expectNext(&reader, .sequence_end);
-    try expectNext(&reader, .false);
-    try expectNext(&reader, .true);
-    try expectNext(&reader, .{ .symbol = .{ .buffered = "cats-and-dogs" } });
+    try reader.expectNext(.set_start);
+    try reader.expectNext(.sequence_start);
+    try reader.expectNext(.{ .string = .{ .buffered = "hello" } });
+    try reader.expectNext(.{ .positive_integer = .{ .buffered = "2456" } });
+    try reader.expectNext(.sequence_end);
+    try reader.expectNext(.false);
+    try reader.expectNext(.true);
+    try reader.expectNext(.{ .symbol = .{ .buffered = "cats-and-dogs" } });
     try expectLast(&reader, .set_end);
 }
 
@@ -853,8 +864,8 @@ test "set missing end token" {
     var reader = Reader.init(std.testing.allocator, &io_reader);
     defer reader.deinit();
 
-    try expectNext(&reader, .set_start);
-    try expectNext(&reader, .{ .string = .{ .buffered = "hello" } });
+    try reader.expectNext(.set_start);
+    try reader.expectNext(.{ .string = .{ .buffered = "hello" } });
     try std.testing.expectError(error.UnexpectedEndOfInput, reader.next());
 }
 
@@ -863,17 +874,17 @@ test "dictionary datatype" {
     var reader = Reader.init(std.testing.allocator, &io_reader);
     defer reader.deinit();
 
-    try expectNext(&reader, .dictionary_start);
-    try expectNext(&reader, .{ .symbol = .{ .buffered = "cabbage" } });
-    try expectNext(&reader, .sequence_start);
-    try expectNext(&reader, .{ .string = .{ .buffered = "i love a good cabbage!" } });
-    try expectNext(&reader, .{ .negative_integer = .{ .buffered = "3456" } });
-    try expectNext(&reader, .sequence_end);
-    try expectNext(&reader, .{ .symbol = .{ .buffered = "shoes" } });
-    try expectNext(&reader, .sequence_start);
-    try expectNext(&reader, .{ .string = .{ .buffered = "new shoes are the best" } });
-    try expectNext(&reader, .{ .positive_integer = .{ .buffered = "23" } });
-    try expectNext(&reader, .sequence_end);
+    try reader.expectNext(.dictionary_start);
+    try reader.expectNext(.{ .symbol = .{ .buffered = "cabbage" } });
+    try reader.expectNext(.sequence_start);
+    try reader.expectNext(.{ .string = .{ .buffered = "i love a good cabbage!" } });
+    try reader.expectNext(.{ .negative_integer = .{ .buffered = "3456" } });
+    try reader.expectNext(.sequence_end);
+    try reader.expectNext(.{ .symbol = .{ .buffered = "shoes" } });
+    try reader.expectNext(.sequence_start);
+    try reader.expectNext(.{ .string = .{ .buffered = "new shoes are the best" } });
+    try reader.expectNext(.{ .positive_integer = .{ .buffered = "23" } });
+    try reader.expectNext(.sequence_end);
     try expectLast(&reader, .dictionary_end);
 }
 
@@ -882,11 +893,11 @@ test "malformed record" {
     var reader = Reader.init(std.testing.allocator, &io_reader);
     defer reader.deinit();
 
-    try expectNext(&reader, .record_start);
-    try expectNext(&reader, .sequence_start);
-    try expectNext(&reader, .{ .string = .{ .buffered = "hello" } });
-    try expectNext(&reader, .{ .positive_integer = .{ .buffered = "2456" } });
-    try expectNext(&reader, .sequence_end);
+    try reader.expectNext(.record_start);
+    try reader.expectNext(.sequence_start);
+    try reader.expectNext(.{ .string = .{ .buffered = "hello" } });
+    try reader.expectNext(.{ .positive_integer = .{ .buffered = "2456" } });
+    try reader.expectNext(.sequence_end);
     try std.testing.expectError(Error.SyntaxError, reader.next());
 }
 
@@ -895,10 +906,10 @@ test "malformed record 2" {
     var reader = Reader.init(std.testing.allocator, &io_reader);
     defer reader.deinit();
 
-    try expectNext(&reader, .record_start);
-    try expectNext(&reader, .sequence_start);
-    try expectNext(&reader, .{ .string = .{ .buffered = "hello" } });
-    try expectNext(&reader, .{ .positive_integer = .{ .buffered = "2456" } });
+    try reader.expectNext(.record_start);
+    try reader.expectNext(.sequence_start);
+    try reader.expectNext(.{ .string = .{ .buffered = "hello" } });
+    try reader.expectNext(.{ .positive_integer = .{ .buffered = "2456" } });
     try std.testing.expectError(Error.SyntaxError, reader.next());
 }
 
@@ -907,7 +918,7 @@ test "incomplete string" {
     var reader = Reader.init(std.testing.allocator, &io_reader);
     defer reader.deinit();
 
-    try expectNext(&reader, .{ .string = .{ .buffered_partial = "nasty" } });
+    try reader.expectNext(.{ .string = .{ .buffered_partial = "nasty" } });
     try std.testing.expectError(Error.UnexpectedEndOfInput, reader.next());
 }
 
@@ -934,7 +945,7 @@ test "boundary int overflowing scratch" {
     var reader = Reader.init(std.testing.allocator, &io_reader.interface);
     defer reader.deinit();
 
-    try expectNext(&reader, .{ .partial_decimal = "01234567890123456789012345678901" });
+    try reader.expectNext(.{ .partial_decimal = "01234567890123456789012345678901" });
     try expectLast(&reader, .{ .negative_integer = .{ .buffered = "2345" } });
 }
 
@@ -991,7 +1002,37 @@ test "boundary string" {
     var reader = Reader.init(std.testing.allocator, &io_reader.interface);
     defer reader.deinit();
 
-    try expectNext(&reader, .{ .string = .{ .buffered_partial = "hello this is" } });
+    try reader.expectNext(.{ .string = .{ .buffered_partial = "hello this is" } });
+    try expectLast(&reader, .{ .string = .{ .buffered = " a test" } });
+}
+
+// Test if the string length crosses a boundary (complicated!)
+test "boundary string length" {
+    var io_reader = std.testing.Reader.init(&read_buf, &.{
+        .{ .buffer = "10" },
+        .{ .buffer = "5\"i like to eat peanut butter and jelly " },
+        .{ .buffer = "sandwiches and eat peas and carrots, and " },
+        .{ .buffer = "then for dessert, peaches." },
+    });
+    var reader = Reader.init(std.testing.allocator, &io_reader.interface);
+    defer reader.deinit();
+
+    try reader.expectNext(.{ .string = .{ .buffered_partial = "i like to eat peanut butter and jelly " } });
+    try reader.expectNext(.{ .string = .{ .buffered_partial = "sandwiches and eat peas and carrots, and " } });
+    try expectLast(&reader, .{ .string = .{ .buffered = "then for dessert, peaches." } });
+}
+
+// Test if the string length crosses a boundary on the first digit (shromplicated!)
+test "boundary string length first-digit" {
+    var io_reader = std.testing.Reader.init(&read_buf, &.{
+        .{ .buffer = "2" },
+        .{ .buffer = "0\"hello this is" },
+        .{ .buffer = " a test" },
+    });
+    var reader = Reader.init(std.testing.allocator, &io_reader.interface);
+    defer reader.deinit();
+
+    try reader.expectNext(.{ .string = .{ .buffered_partial = "hello this is" } });
     try expectLast(&reader, .{ .string = .{ .buffered = " a test" } });
 }
 
@@ -1005,10 +1046,23 @@ test nextAlloc {
     defer reader.deinit();
 
     const alloc = try reader.nextAlloc(std.testing.allocator, .if_needed);
-    try reader.expectEndOfDocument();
     defer std.testing.allocator.free(alloc.string.allocated);
     try expectEqualTokens(
         .{ .string = .{ .allocated = "hello this is a test of the buffering system!" } },
         alloc,
     );
+
+    try reader.expectEndOfDocument();
+}
+
+test "unreasonably large buffer boundary length specifier" {
+    var io_reader = std.testing.Reader.init(&read_buf, &.{
+        .{ .buffer = "4526" },
+        .{ .buffer = "9999" },
+        .{ .buffer = "999999999999'According to all known" },
+    });
+    var reader = Reader.init(std.testing.allocator, &io_reader.interface);
+    defer reader.deinit();
+
+    try std.testing.expectError(error.Overflow, reader.next());
 }
