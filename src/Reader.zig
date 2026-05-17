@@ -94,6 +94,8 @@ const State = enum {
     float_continue,
     /// We are in the middle of parsing a double, and need to continue after allocating
     double_continue,
+    /// We have finished parsing the syrup value.
+    end_of_document,
 };
 
 underlying_reader: *std.Io.Reader,
@@ -177,9 +179,19 @@ fn parseFloatValue(T: anytype, slice: []const u8) T {
 
 /// Read the next token without allocating anything. Tokens may be non-terminal, and need to be read further.
 pub fn next(self: *Reader) NextError!Token {
+    const result = try self.nextInternal();
+    if (self.isFinalToken(result)) {
+        self.state = .end_of_document;
+    }
+
+    return result;
+}
+
+fn nextInternal(self: *Reader) NextError!Token {
     state_loop: while (true) {
         const state = self.state;
         switch (state) {
+            .end_of_document => return .end_of_document,
             .value => {
                 const byte = try self.expectByte();
                 switch (byte) {
@@ -405,6 +417,43 @@ pub fn next(self: *Reader) NextError!Token {
     }
 }
 
+fn isFinalToken(self: *Reader, token: Token) bool {
+    // See if we are done, based on the state and the token.
+    if (self.collection_stack.items.len == 0) {
+        switch (token) {
+            // If the stack is empty, these are always terminal states:
+            .sequence_end,
+            .record_end,
+            .set_end,
+            .dictionary_end,
+            .true,
+            .false,
+            .f32,
+            .f64,
+            .end_of_document,
+            => return true,
+            // These may be terminal if they are at their end.
+            .positive_integer,
+            .negative_integer,
+            .data,
+            .string,
+            .symbol,
+            => |bytes| switch (bytes) {
+                .terminal, .allocated => return true,
+                else => return false,
+            },
+            // These are mid-process states.
+            .sequence_start,
+            .record_start,
+            .set_start,
+            .dictionary_start,
+            => return false,
+        }
+    }
+
+    return false;
+}
+
 fn appendSlice(gpa: Allocator, list: *std.ArrayList(u8), buf: []const u8, max_value_len: usize) !void {
     const new_len = std.math.add(usize, list.items.len, buf.len) catch return error.ValueTooLong;
     if (new_len > max_value_len) return error.ValueTooLong;
@@ -424,6 +473,7 @@ pub fn isNextTokenAllocatable(self: *Reader) !bool {
         .symbol_continue,
         .float_continue,
         .double_continue,
+        .end_of_document,
         => false, // if we are already in the midst of getting a value, it's not allocatable.
     };
 }
@@ -567,33 +617,42 @@ fn expectNext(self: *Reader, expected_token: Token) !void {
     return expectEqualTokens(expected_token, try self.next());
 }
 
+fn expectLast(self: *Reader, expected_token: Token) !void {
+    try self.expectNext(expected_token);
+    try self.expectEndOfDocument();
+}
+
+fn expectEndOfDocument(self: *Reader) !void {
+    try std.testing.expectEqual(Token.end_of_document, try self.next());
+}
+
 test "simple datatypes" {
     var io_reader = std.Io.Reader.fixed("f");
     var reader = Reader.init(std.testing.allocator, &io_reader);
     {
         defer reader.deinit();
-        try expectNext(&reader, .false);
+        try expectLast(&reader, .false);
     }
 
     io_reader = std.Io.Reader.fixed("t");
     reader = Reader.init(std.testing.allocator, &io_reader);
     {
         defer reader.deinit();
-        try expectNext(&reader, .true);
+        try expectLast(&reader, .true);
     }
 
     io_reader = std.Io.Reader.fixed("502345+");
     reader = Reader.init(std.testing.allocator, &io_reader);
     {
         defer reader.deinit();
-        try expectNext(&reader, .{ .positive_integer = .{ .terminal = "502345" } });
+        try expectLast(&reader, .{ .positive_integer = .{ .terminal = "502345" } });
     }
 
     io_reader = std.Io.Reader.fixed("323-");
     reader = Reader.init(std.testing.allocator, &io_reader);
     {
         defer reader.deinit();
-        try expectNext(&reader, .{ .negative_integer = .{ .terminal = "323" } });
+        try expectLast(&reader, .{ .negative_integer = .{ .terminal = "323" } });
     }
 }
 
@@ -602,14 +661,14 @@ test "float datatypes" {
     var reader = Reader.init(std.testing.allocator, &io_reader);
     {
         defer reader.deinit();
-        try expectNext(&reader, .{ .f64 = 14.4 });
+        try expectLast(&reader, .{ .f64 = 14.4 });
     }
 
     io_reader = std.Io.Reader.fixed(&[_]u8{ 'F', 66, 105, 117, 195 });
     reader = Reader.init(std.testing.allocator, &io_reader);
     {
         defer reader.deinit();
-        try expectNext(&reader, .{ .f32 = 58.365 });
+        try expectLast(&reader, .{ .f32 = 58.365 });
     }
 }
 
@@ -618,14 +677,14 @@ test "string datatype" {
     var reader = Reader.init(std.testing.allocator, &io_reader);
     {
         defer reader.deinit();
-        try expectNext(&reader, .{ .string = .{ .terminal = "i love you, christine 😍" } });
+        try expectLast(&reader, .{ .string = .{ .terminal = "i love you, christine 😍" } });
     }
 
     io_reader = std.Io.Reader.fixed("6\"björn");
     reader = Reader.init(std.testing.allocator, &io_reader);
     {
         defer reader.deinit();
-        try expectNext(&reader, .{ .string = .{ .terminal = "björn" } });
+        try expectLast(&reader, .{ .string = .{ .terminal = "björn" } });
     }
 }
 
@@ -633,14 +692,14 @@ test "data datatype" {
     var io_reader = std.Io.Reader.fixed(&[_]u8{ '5', ':', 69, 68, 67, 66, 65 });
     var reader = Reader.init(std.testing.allocator, &io_reader);
     defer reader.deinit();
-    try expectNext(&reader, .{ .data = .{ .terminal = &[_]u8{ 69, 68, 67, 66, 65 } } });
+    try expectLast(&reader, .{ .data = .{ .terminal = &[_]u8{ 69, 68, 67, 66, 65 } } });
 }
 
 test "symbol datatype" {
     var io_reader = std.Io.Reader.fixed("6'hämta");
     var reader = Reader.init(std.testing.allocator, &io_reader);
     defer reader.deinit();
-    try expectNext(&reader, .{ .symbol = .{ .terminal = "hämta" } });
+    try expectLast(&reader, .{ .symbol = .{ .terminal = "hämta" } });
 }
 
 test "sequence datatype" {
@@ -656,7 +715,7 @@ test "sequence datatype" {
     try expectNext(&reader, .{ .negative_integer = .{ .terminal = "170141183460469231731687303715884105690" } });
     try expectNext(&reader, .{ .string = .{ .terminal = "testing nesting" } });
     try expectNext(&reader, .sequence_end);
-    try expectNext(&reader, .sequence_end);
+    try expectLast(&reader, .sequence_end);
 }
 
 test init {
@@ -672,7 +731,7 @@ test init {
     try expectNext(&reader, .true);
     try expectNext(&reader, .false);
     try expectNext(&reader, .{ .symbol = .{ .terminal = "dogs-and-cats" } });
-    try expectNext(&reader, .record_end);
+    try expectLast(&reader, .record_end);
 }
 
 test "sets" {
@@ -691,7 +750,7 @@ test "sets" {
     try expectNext(&reader, .false);
     try expectNext(&reader, .true);
     try expectNext(&reader, .{ .symbol = .{ .terminal = "cats-and-dogs" } });
-    try expectNext(&reader, .set_end);
+    try expectLast(&reader, .set_end);
 }
 
 test "set missing end token" {
@@ -720,7 +779,7 @@ test "dictionary datatype" {
     try expectNext(&reader, .{ .string = .{ .terminal = "new shoes are the best" } });
     try expectNext(&reader, .{ .positive_integer = .{ .terminal = "23" } });
     try expectNext(&reader, .sequence_end);
-    try expectNext(&reader, .dictionary_end);
+    try expectLast(&reader, .dictionary_end);
 }
 
 test "malformed record" {
@@ -766,7 +825,7 @@ test "boundary float" {
     var reader = Reader.init(std.testing.allocator, &io_reader.interface);
     defer reader.deinit();
 
-    try expectNext(&reader, .{ .f32 = 58.365 });
+    try expectLast(&reader, .{ .f32 = 58.365 });
 }
 
 test "boundary double" {
@@ -776,7 +835,7 @@ test "boundary double" {
     });
     var reader = Reader.init(std.testing.allocator, &io_reader.interface);
     defer reader.deinit();
-    try expectNext(&reader, .{ .f64 = 14.4 });
+    try expectLast(&reader, .{ .f64 = 14.4 });
 }
 
 test "boundary double 2" {
@@ -786,7 +845,7 @@ test "boundary double 2" {
     });
     var reader = Reader.init(std.testing.allocator, &io_reader.interface);
     defer reader.deinit();
-    try expectNext(&reader, .{ .f64 = 14.4 });
+    try expectLast(&reader, .{ .f64 = 14.4 });
 }
 
 test "boundary string" {
@@ -798,7 +857,7 @@ test "boundary string" {
     defer reader.deinit();
 
     try expectNext(&reader, .{ .string = .{ .non_terminal = "hello this is" } });
-    try expectNext(&reader, .{ .string = .{ .terminal = " a test" } });
+    try expectLast(&reader, .{ .string = .{ .terminal = " a test" } });
 }
 
 test nextAlloc {
@@ -811,6 +870,7 @@ test nextAlloc {
     defer reader.deinit();
 
     const alloc = try reader.nextAlloc(std.testing.allocator, .if_needed);
+    try reader.expectEndOfDocument();
     defer std.testing.allocator.free(alloc.string.allocated);
     try expectEqualTokens(
         .{ .string = .{ .allocated = "hello this is a test of the buffering system!" } },
