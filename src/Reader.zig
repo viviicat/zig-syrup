@@ -28,7 +28,7 @@ pub const NextError = std.Io.Reader.Error ||
     Allocator.Error ||
     error{ InvalidCharacter, Overflow };
 
-const BytesType = union(enum) {
+pub const BytesType = union(enum) {
     /// The bytes contain the full data, and are not separately allocated from the input buffer.
     terminal: []const u8,
     /// The bytes do not contain the end of the data. At least one more BytesType will be returned with more data. This field of the union is only returned if you are using the non-allocating `next`.
@@ -37,7 +37,7 @@ const BytesType = union(enum) {
     allocated: []const u8,
 };
 
-const Token = union(enum) {
+pub const Token = union(enum) {
     /// We are at the beginning of a sequence
     sequence_start,
     /// We are at the end of a sequence
