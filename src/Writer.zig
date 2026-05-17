@@ -46,6 +46,8 @@ const FormatterError = std.Io.Writer.Error || std.Io.Reader.Error;
 pub const FlatError = FormatterError || std.mem.Allocator.Error;
 pub const WritingError = UnderflowError || ParsingError || FlatError;
 
+pub const Error = UnderflowError || ParsingError || error{NotFinished};
+
 pub const VTable = struct {
     /// Write a boolean Syrup value.
     writeBool: *const fn (writer: *std.Io.Writer, val: bool) FormatterError!void,
