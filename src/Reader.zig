@@ -50,6 +50,7 @@ pub const Integer = struct {
         return .{ .buffer = buf, .storage = .heap };
     }
 
+    /// Possibly release memory, depending on the value of `storage`.
     pub fn deinit(self: Integer, gpa: std.mem.Allocator) void {
         if (self.storage == .heap) {
             gpa.free(self.buffer);
@@ -91,6 +92,7 @@ pub const DataPacket = struct {
         };
     }
 
+    /// Possibly release memory, depending on the value of `storage`.
     pub fn deinit(self: DataPacket, gpa: std.mem.Allocator) void {
         if (self.storage == .heap) {
             gpa.free(self.buffer);
