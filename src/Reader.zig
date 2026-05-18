@@ -38,16 +38,23 @@ pub const BufferStorage = enum {
 
 /// A complete integer stored as a bytestring.
 pub const Integer = struct {
-    /// The integer string, stored as base10 characters. This may be allocated or a slice of the buffer depending on the value of `storage`.
+    const Sign = enum {
+        positive,
+        negative,
+    };
+
+    /// The integer as a string, stored as base10 characters. This may be allocated or a slice of the buffer depending on the value of `storage`.
     buffer: []const u8,
     /// Where the data is stored.
     storage: BufferStorage,
 
-    fn buffered(buf: []const u8) Integer {
-        return .{ .buffer = buf, .storage = .buffer };
+    sign: Sign,
+
+    fn buffered(buf: []const u8, sign: Sign) Integer {
+        return .{ .buffer = buf, .storage = .buffer, .sign = sign };
     }
-    fn heaped(buf: []const u8) Integer {
-        return .{ .buffer = buf, .storage = .heap };
+    fn heaped(buf: []const u8, sign: Sign) Integer {
+        return .{ .buffer = buf, .storage = .heap, .sign = sign };
     }
 
     /// Possibly release memory, depending on the value of `storage`.
@@ -56,6 +63,8 @@ pub const Integer = struct {
             gpa.free(self.buffer);
         }
     }
+
+    pub fn toInteger(_: Integer) void {}
 };
 
 /// A packet of data for a string, data object, or symbol.
@@ -133,10 +142,8 @@ pub const Token = union(enum) {
     /// The reader attempts to avoid this case by using `boundary_scratch`, but if the number string doesn't fit in 64 bytes, it gives up and returns this.
     partial_decimal: []const u8,
 
-    /// We parsed, and possibly allocated, a positive integer
-    positive_integer: Integer,
-    /// We parsed, and possibly allocated, a negative integer
-    negative_integer: Integer,
+    /// We parsed, and possibly allocated, an integer
+    integer: Integer,
     /// We parsed, and possibly allocated, data
     data: DataPacket,
     /// We parsed, and possibly allocated, a string
@@ -419,13 +426,13 @@ fn nextInternal(self: *Reader) NextError!Token {
                             self.state = .value;
                             const val = self.takeValueSlice();
                             self.cursor += 1;
-                            return Token{ .positive_integer = .buffered(val) };
+                            return Token{ .integer = .buffered(val, .positive) };
                         },
                         tags.int.Negative => {
                             self.state = .value;
                             const val = self.takeValueSlice();
                             self.cursor += 1;
-                            return Token{ .negative_integer = .buffered(val) };
+                            return Token{ .integer = .buffered(val, .negative) };
                         },
                         tags.Data, tags.String, tags.Symbol => {
                             const len_str = self.takeValueSlice();
@@ -551,8 +558,7 @@ fn isFinalToken(self: *Reader, token: Token) bool {
             .record_end,
             .set_end,
             .dictionary_end,
-            .positive_integer,
-            .negative_integer,
+            .integer,
             .true,
             .false,
             .f32,
@@ -623,8 +629,7 @@ pub fn nextAllocMax(self: *Reader, allocator: Allocator, when: AllocWhen, max_va
             .partial_decimal => |slice| {
                 try appendSlice(self.gpa, &value_list, slice, max_value_len);
             },
-            .positive_integer,
-            .negative_integer,
+            .integer,
             => |int| {
                 if (when == .if_needed and value_list.items.len == 0) {
                     return token;
@@ -632,11 +637,7 @@ pub fn nextAllocMax(self: *Reader, allocator: Allocator, when: AllocWhen, max_va
 
                 try appendSlice(self.gpa, &value_list, int.buffer, max_value_len);
                 const alloc_slice = try value_list.toOwnedSlice(self.gpa);
-                return switch (token) {
-                    .positive_integer => Token{ .positive_integer = .heaped(alloc_slice) },
-                    .negative_integer => Token{ .negative_integer = .heaped(alloc_slice) },
-                    else => unreachable,
-                };
+                return Token{ .integer = .heaped(alloc_slice, token.integer.sign) };
             },
             .data,
             .string,
@@ -713,11 +714,8 @@ fn expectEqualTokens(expected_token: Token, actual_token: Token) !void {
         .f64 => |expected_value| {
             try std.testing.expectEqual(expected_value, actual_token.f64);
         },
-        .positive_integer => |expected_integer| {
-            try expectEqualInteger(expected_integer, actual_token.positive_integer);
-        },
-        .negative_integer => |expected_integer| {
-            try expectEqualInteger(expected_integer, actual_token.negative_integer);
+        .integer => |expected_integer| {
+            try expectEqualInteger(expected_integer, actual_token.integer);
         },
         .data => |expected_packet| {
             try expectEqualDataPacket(expected_packet, actual_token.data);
@@ -779,14 +777,14 @@ test "simple datatypes" {
     reader = Reader.init(std.testing.allocator, &io_reader);
     {
         defer reader.deinit();
-        try expectLast(&reader, .{ .positive_integer = .buffered("502345") });
+        try expectLast(&reader, .{ .integer = .buffered("502345", .positive) });
     }
 
     io_reader = std.Io.Reader.fixed("323-");
     reader = Reader.init(std.testing.allocator, &io_reader);
     {
         defer reader.deinit();
-        try expectLast(&reader, .{ .negative_integer = .buffered("323") });
+        try expectLast(&reader, .{ .integer = .buffered("323", .negative) });
     }
 }
 
@@ -843,10 +841,10 @@ test "sequence datatype" {
 
     try reader.expectNext(.sequence_start);
     try reader.expectNext(.{ .string = .buffered("a test") });
-    try reader.expectNext(.{ .positive_integer = .buffered("45") });
+    try reader.expectNext(.{ .integer = .buffered("45", .positive) });
     try reader.expectNext(.{ .symbol = .buffered("shark") });
     try reader.expectNext(.sequence_start);
-    try reader.expectNext(.{ .negative_integer = .buffered("170141183460469231731687303715884105690") });
+    try reader.expectNext(.{ .integer = .buffered("170141183460469231731687303715884105690", .negative) });
     try reader.expectNext(.{ .string = .buffered("testing nesting") });
     try reader.expectNext(.sequence_end);
     try expectLast(&reader, .sequence_end);
@@ -860,7 +858,7 @@ test init {
     try reader.expectNext(.record_start);
     try reader.expectNext(.sequence_start);
     try reader.expectNext(.{ .string = .buffered("hello") });
-    try reader.expectNext(.{ .positive_integer = .buffered("2456") });
+    try reader.expectNext(.{ .integer = .buffered("2456", .positive) });
     try reader.expectNext(.sequence_end);
     try reader.expectNext(.true);
     try reader.expectNext(.false);
@@ -879,7 +877,7 @@ test "sets" {
     try reader.expectNext(.set_start);
     try reader.expectNext(.sequence_start);
     try reader.expectNext(.{ .string = .buffered("hello") });
-    try reader.expectNext(.{ .positive_integer = .buffered("2456") });
+    try reader.expectNext(.{ .integer = .buffered("2456", .positive) });
     try reader.expectNext(.sequence_end);
     try reader.expectNext(.false);
     try reader.expectNext(.true);
@@ -906,12 +904,12 @@ test "dictionary datatype" {
     try reader.expectNext(.{ .symbol = .buffered("cabbage") });
     try reader.expectNext(.sequence_start);
     try reader.expectNext(.{ .string = .buffered("i love a good cabbage!") });
-    try reader.expectNext(.{ .negative_integer = .buffered("3456") });
+    try reader.expectNext(.{ .integer = .buffered("3456", .negative) });
     try reader.expectNext(.sequence_end);
     try reader.expectNext(.{ .symbol = .buffered("shoes") });
     try reader.expectNext(.sequence_start);
     try reader.expectNext(.{ .string = .buffered("new shoes are the best") });
-    try reader.expectNext(.{ .positive_integer = .buffered("23") });
+    try reader.expectNext(.{ .integer = .buffered("23", .positive) });
     try reader.expectNext(.sequence_end);
     try expectLast(&reader, .dictionary_end);
 }
@@ -924,7 +922,7 @@ test "malformed record" {
     try reader.expectNext(.record_start);
     try reader.expectNext(.sequence_start);
     try reader.expectNext(.{ .string = .buffered("hello") });
-    try reader.expectNext(.{ .positive_integer = .buffered("2456") });
+    try reader.expectNext(.{ .integer = .buffered("2456", .positive) });
     try reader.expectNext(.sequence_end);
     try std.testing.expectError(Error.SyntaxError, reader.next());
 }
@@ -937,7 +935,7 @@ test "malformed record 2" {
     try reader.expectNext(.record_start);
     try reader.expectNext(.sequence_start);
     try reader.expectNext(.{ .string = .buffered("hello") });
-    try reader.expectNext(.{ .positive_integer = .buffered("2456") });
+    try reader.expectNext(.{ .integer = .buffered("2456", .positive) });
     try std.testing.expectError(Error.SyntaxError, reader.next());
 }
 
@@ -960,7 +958,7 @@ test "boundary int using scratch" {
     var reader = Reader.init(std.testing.allocator, &io_reader.interface);
     defer reader.deinit();
 
-    try expectLast(&reader, .{ .negative_integer = .buffered("234235234234234234") });
+    try expectLast(&reader, .{ .integer = .buffered("234235234234234234", .negative) });
 }
 
 test "boundary int overflowing scratch" {
@@ -978,7 +976,7 @@ test "boundary int overflowing scratch" {
     defer reader.deinit();
 
     try reader.expectNext(.{ .partial_decimal = "0123456789012345678901234567890123456789012345678901234567890123" });
-    try expectLast(&reader, .{ .negative_integer = .buffered("456789012345") });
+    try expectLast(&reader, .{ .integer = .buffered("456789012345", .negative) });
 }
 
 test "boundary int alloc" {
@@ -990,8 +988,8 @@ test "boundary int alloc" {
     defer reader.deinit();
 
     const token = try reader.nextAlloc(std.testing.allocator, .always);
-    defer token.negative_integer.deinit(std.testing.allocator);
-    try expectEqualTokens(.{ .negative_integer = .heaped("234235234234234234") }, token);
+    defer token.integer.deinit(std.testing.allocator);
+    try expectEqualTokens(.{ .integer = .heaped("234235234234234234", .negative) }, token);
     try reader.expectEndOfDocument();
 }
 
