@@ -1142,4 +1142,12 @@ test "to int conversion" {
         const token = try reader.next();
         try std.testing.expectError(error.Overflow, token.int.toInt(u64));
     }
+
+    io_reader = std.Io.Reader.fixed("32399299299299299929929929-");
+    reader = Reader.init(std.testing.allocator, &io_reader);
+    {
+        defer reader.deinit();
+        const token = try reader.next();
+        try std.testing.expectError(error.Overflow, token.int.toInt(i32));
+    }
 }
