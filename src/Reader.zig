@@ -70,7 +70,7 @@ pub const IntPacket = struct {
             std.mem.eql(u8, self.buffer, other.buffer);
     }
 
-    /// Convert from `IntPacket` to any integer
+    /// Convert from `IntPacket` to any integer that can fit it.
     pub fn toInt(self: IntPacket, T: anytype) std.fmt.ParseIntError!T {
         const signedness = switch (@typeInfo(T)) {
             .int => |i| i.signedness,
