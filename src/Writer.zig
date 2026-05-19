@@ -1,18 +1,17 @@
 //! A writer for the Syrup data format. Can write all of the supported Syrup datatypes to an underlying
 //! `std.Io.Writer`.
 //!
-//! There are several supported options for writing:
-//! - Write `Value` types to represent a structure dynamically with `writeValue`.
-//! - Write primitives with the primitive methods like `writeString`, `writeBool`, etc.
-//! - Write all of the above, and also Zig types, with `write`
-//! - Write Syrup structures using the structural writing methods like `writeDictionary` and `writeSequence`.
+//! There are many supported options for writing:
+//! - Write a Zig type, including primitives, with `write` (most types are supported through the magic of `comptime`).
+//! - You can even write an anonymous struct (defined at compile time) with `write`.
+//! - You can also write primitives with the primitive methods like `writeString`, `writeBool`, etc (or just `write`).
+//! - Use `dynamic.Value` to build structures at runtime to write with `writeDynamicValue` and friends (or just `write`).
+//! - Build up Syrup structures manually using the structural writing methods like `writeDictionaryStart` and `writeSequenceStart`.
 
 const std = @import("std");
 
 const base32 = @import("base32.zig");
 const dynamic = @import("dynamic.zig");
-const Value = dynamic.Value;
-const Record = dynamic.Record;
 const tags = @import("tags.zig");
 const CollectionMode = @import("collections.zig").CollectionMode;
 
@@ -391,13 +390,18 @@ inline fn curWriter(self: *Writer) *std.Io.Writer {
     return if (self.dict_or_set_depth > 0) &self.tmp_writer.writer else self.underlying_writer;
 }
 
+const Options = struct {
+    /// Layout to use
+    layout: FieldLayout,
+};
+
 /// Write a supported type.
 pub fn write(self: *Writer, val: anytype) WritingError!void {
-    return self.writeWithFieldType(val, .default);
+    return self.writeWithFieldLayout(val, .default);
 }
 
-fn writeBytesWithType(self: *Writer, val: []const u8, field_type: FieldType) FlatError!void {
-    switch (field_type) {
+fn writeBytesWithLayout(self: *Writer, val: []const u8, field_layout: FieldLayout) FlatError!void {
+    switch (field_layout) {
         .string, .default => try self.writeString(val),
         .data => try self.writeData(val),
         .symbol => try self.writeSymbol(val),
@@ -405,18 +409,17 @@ fn writeBytesWithType(self: *Writer, val: []const u8, field_type: FieldType) Fla
     }
 }
 
-fn writeWithFieldType(self: *Writer, val: anytype, comptime field_type: FieldType) WritingError!void {
-    const ValType = @TypeOf(val);
-    const val_info = @typeInfo(ValType);
+pub fn writeWithFieldLayout(self: *Writer, val: anytype, comptime field_layout: FieldLayout) WritingError!void {
+    const T = @TypeOf(val);
+    const val_info = @typeInfo(T);
+    const type_name = @typeName(T);
 
-    try switch (ValType) {
-        Value => self.writeValue(&val),
-        *const Value => self.writeValue(val),
-        Record => self.writeRecord(val),
-        *const Record => self.writeRecord(val),
+    try switch (T) {
         bool => self.writeBool(val),
         f32 => self.writeFloat(val),
         f64 => self.writeDouble(val),
+        dynamic.Value => self.writeDynamicValue(&val),
+        dynamic.Record => self.writeDynamicRecord(&val),
         else => switch (val_info) {
             .int => self.writeInt(val),
             .comptime_float => {
@@ -430,78 +433,77 @@ fn writeWithFieldType(self: *Writer, val: anytype, comptime field_type: FieldTyp
             .null => self.writeBool(false),
             .optional => {
                 if (val) |payload| {
-                    return self.writeWithFieldType(payload, field_type);
+                    return self.writeWithFieldLayout(payload, field_layout);
                 } else {
-                    return self.writeWithFieldType(null, field_type);
+                    return self.writeWithFieldLayout(null, field_layout);
                 }
             },
-            .array => self.writeWithFieldType(&val, field_type),
+            .array => self.writeWithFieldLayout(&val, field_layout),
             .vector => |info| {
                 const array: [info.len]info.child = val;
-                return self.writeWithFieldType(&array, field_type);
+                return self.writeWithFieldLayout(&array, field_layout);
             },
-            .@"struct" => |structure| {
-                const TypeName = @typeName(ValType);
+            .@"struct" => |struct_info| {
 
                 // Check if it's an instance of a HashMap, if so we can write it as a Dictionary.
                 // If it has a KV declaration we assume it is. A little more fragile than I would like, but I think it's relatively okay.
-                const is_hash_map_like = @hasDecl(ValType, "KV");
+                const is_hash_map_like = @hasDecl(T, "KV");
 
                 if (is_hash_map_like) {
-                    const V = @typeInfo(@field(ValType, "KV")).@"struct".fields[1].type;
+                    const V = @typeInfo(@field(T, "KV")).@"struct".fields[1].type;
                     switch (V) {
                         void => {
-                            if (field_type != .default and field_type != .set) {
-                                @compileError(TypeName ++ " was detected to be a Set (seems to be HashMap with void V), but the field type specified for it was not `.set`.");
+                            if (field_layout == .default and field_layout != .set) {
+                                @compileError(type_name ++ " was detected to be a Set (seems to be HashMap with void V), but the layout specified for it was not `.set`.");
                             }
 
-                            const set_type = comptime if (field_type == .set)
-                                field_type.set.toFieldType()
+                            const set_type = comptime if (field_layout == .set)
+                                field_layout.set.toFieldLayout()
                             else
                                 .default;
 
                             try self.writeSetStart();
 
                             // Support both a standard HashMap that has a keyIterator, and the StaticStringMap which just has a keys function.
-                            if (std.meta.hasFn(ValType, "keyIterator")) {
+                            if (std.meta.hasFn(T, "keyIterator")) {
                                 for (val.keys()) |key| {
-                                    try self.writeWithFieldType(key, set_type);
+                                    try self.writeWithFieldLayout(key, set_type);
                                 }
                                 var i = 0;
                                 var it = val.keyIterator();
                                 while (it.next()) |key| {
-                                    try self.writeWithFieldType(key, set_type);
+                                    try self.writeWithFieldLayout(key, set_type);
                                     i += 1;
                                 }
-                            } else if (std.meta.hasFn(ValType, "keys")) {
+                            } else if (std.meta.hasFn(T, "keys")) {
                                 for (val.keys()) |key| {
-                                    try self.writeWithFieldType(key, set_type);
+                                    try self.writeWithFieldLayout(key, set_type);
                                 }
                             } else @compileError("Found what looks like a set (has a KV decl with a void value) but it doesn't have `keyIterator` or `keys` functions");
                             return self.writeSetEnd();
                         },
                         else => {
-                            if (field_type != .default and field_type != .dictionary) {
-                                @compileError(TypeName ++ " was detected to be a Dictionary (seems to be HashMap), but the field type specified for it was not `.dictionary`.");
+                            if (field_layout != .default and field_layout != .dictionary) {
+                                @compileError(type_name ++ " was detected to be a Dictionary (seems to be HashMap), but the layout specified for it was not `.dictionary`.");
                             }
 
-                            const dict_key_type = if (field_type == .dictionary) field_type.dictionary.key.toFieldType() else .default;
-                            const dict_value_type = if (field_type == .dictionary) field_type.dictionary.value.toFieldType() else .default;
+                            const dict_key_type = if (field_layout == .dictionary) field_layout.dictionary.key.toFieldLayout() else .default;
+                            const dict_value_type = if (field_layout == .dictionary) field_layout.dictionary.value.toFieldLayout() else .default;
 
                             try self.writeDictionaryStart();
                             // Support both a standard HashMap that has an iterator, and the StaticStringMap which just has a kvs field
-                            if (std.meta.hasFn(ValType, "iterator")) {
+                            if (std.meta.hasFn(T, "iterator")) {
                                 var i = 0;
                                 var it = val.iterator();
                                 while (it.next()) |kv| {
-                                    try self.writeWithFieldType(kv.key, dict_key_type);
-                                    try self.writeWithFieldType(kv.value, dict_value_type);
+                                    try self.writeWithFieldLayout(kv.key, dict_key_type);
+                                    try self.writeWithFieldLayout(kv.value, dict_value_type);
                                     i += 1;
                                 }
-                            } else if (std.meta.hasFn(ValType, "keys")) {
+                            } else if (std.meta.hasFn(T, "keys")) {
                                 for (0..val.kvs.len) |i| {
-                                    try self.writeWithFieldType(val.kvs.keys[i], dict_key_type);
-                                    try self.writeWithFieldType(val.kvs.values[i], dict_value_type);
+                                    try self.writeWithFieldLayout(val.kvs.keys[i], dict_key_type);
+                                    try self.writeWithFieldLayout(val.kvs.values[i], dict_value_type);
                                 }
                             } else @compileError("Found a dictionary-like struct (has a KV decl with key and value) but it doesn't have `iterator` or `keys` functions");
                             return self.writeDictionaryEnd();
@@ -509,71 +511,94 @@ fn writeWithFieldType(self: *Writer, val: anytype, comptime field_type: FieldTyp
                     }
                 }
 
-                const has_wire_format = @hasDecl(ValType, "wire_format");
+                const has_syrup_format = @hasDecl(T, "syrup_format");
+                if (has_syrup_format and @TypeOf(T.syrup_format) != WireFormat) {
+                    @compileError("`syrup_format` declaration found in struct " ++ type_name ++ ", but it is type " ++ @typeName(T.syrup_format) ++ ". Must be " ++ @typeInfo(WireFormat) ++ ".");
+                }
 
-                if (has_wire_format) {
-                    if (ValType.wire_format.fields) |field_types| {
-                        // Verify wire format count matches field count
-                        if (field_types.len != structure.fields.len) {
+                if (has_syrup_format) {
+                    if (T.syrup_format.fields) |field_layouts| {
+                        // Verify field layout count matches field count
+                        if (field_layouts.len != struct_info.fields.len) {
                             @compileError(std.fmt.comptimePrint(
-                                "found wire_format declaration in {s}, length of field type list ({}) doesn't match the number of fields ({}).",
-                                .{ TypeName, field_types.len, structure.fields.len },
+                                "found `syrup_format` declaration in {s}, but length of layout list ({}) doesn't match the number of fields ({}).",
+                                .{ type_name, field_layouts.len, struct_info.fields.len },
                             ));
                         }
                     }
                 }
 
                 // Tuples default to a sequence.
-                const write_sequence = (!has_wire_format and structure.is_tuple) or
-                    (has_wire_format and ValType.wire_format.layout == .sequence);
+                const write_sequence = (!has_syrup_format and struct_info.is_tuple) or
+                    (has_syrup_format and T.syrup_format.layout == .sequence);
                 if (write_sequence) {
                     try self.writeSequenceStart();
-                } else if (!has_wire_format or ValType.wire_format.layout == .dictionary) {
+                } else if (!has_syrup_format or T.syrup_format.layout == .dictionary) {
                     // Other structs default to a dictionary.
                     try self.writeDictionaryStart();
-                } else if (ValType.wire_format.layout == .record) {
-                    const record_label_type: FieldType = if (has_wire_format)
-                        ValType.wire_format.layout.record.label
+                } else if (T.syrup_format.layout == .record) {
+                    const record_label_layout: FieldLayout = if (has_syrup_format)
+                        T.syrup_format.layout.record.label
                     else
                         .default;
 
-                    const type_name = if (has_wire_format)
-                        ValType.wire_format.layout.record.name orelse TypeName
+                    const rec_type_name = if (has_syrup_format)
+                        T.syrup_format.layout.record.name orelse type_name
                     else
-                        TypeName;
+                        type_name;
 
-                    try self.writeRecordStartLabeledWithType(type_name, record_label_type);
+                    try self.writeRecordStartLabeledWithLayout(rec_type_name, record_label_layout);
                 }
 
                 comptime var i = 0;
-                inline for (structure.fields) |Field| {
+                inline for (struct_info.fields) |Field| {
                     if (!write_sequence and
-                        (!has_wire_format or ValType.wire_format.layout == .dictionary))
+                        (!has_syrup_format or T.syrup_format.layout == .dictionary))
                     {
                         // Default to symbols as dictionary keys
-                        try self.writeWithFieldType(Field.name, if (has_wire_format) ValType.wire_format.layout.dictionary else .symbol);
+                        try self.writeWithFieldLayout(Field.name, if (has_syrup_format) T.syrup_format.layout.dictionary else .symbol);
                     }
 
-                    const ft = if (has_wire_format)
-                        if (ValType.wire_format.fields) |field_types|
-                            field_types[i]
+                    const ft = if (has_syrup_format)
+                        if (T.syrup_format.fields) |field_layouts|
+                            field_layouts[i]
                         else
                             .default
                     else
                         .default;
 
-                    try self.writeWithFieldType(@field(val, Field.name), ft);
+                    try self.writeWithFieldLayout(@field(val, Field.name), ft);
                     i += 1;
                 }
 
                 if (write_sequence) {
                     return self.writeSequenceEnd();
-                } else if (!has_wire_format or ValType.wire_format.layout == .dictionary) {
+                } else if (!has_syrup_format or T.syrup_format.layout == .dictionary) {
                     return self.writeDictionaryEnd();
                 } else {
                     return self.writeRecordEnd();
                 }
             },
+            .@"enum" => |enum_info| {
+                const has_syrup_format = @hasDecl(T, "syrup_format");
+                if (has_syrup_format and @TypeOf(T.syrup_format) != EnumLayout) {
+                    @compileError("`syrup_format` declaration found in enum " ++ type_name ++ ", but it is type " ++ @typeName(T.syrup_format) ++ ". Must be " ++ @typeInfo(EnumLayout) ++ ".");
+                }
+
+                if (!enum_info.is_exhaustive) {
+                    // Check if the value is part of the enum (print the value directly if not).
+                    inline for (enum_info.fields) |field| {
+                        if (val == @field(T, field.name)) {
+                            break;
+                        }
+                    } else {
+                        return self.write(@intFromEnum(val));
+                    }
+                }
+
+                return self.writeWithFieldLayout(@tagName(val), if (field_layout == .default and has_syrup_format) val.syrup_format.toFieldLayout() else field_layout);
+            },
+            .enum_literal => self.writeWithFieldLayout(@tagName(val), field_layout),
             .pointer => |ptr_info| switch (ptr_info.size) {
                 .one => {
                     const ChildType = ptr_info.child;
@@ -582,53 +607,53 @@ fn writeWithFieldType(self: *Writer, val: anytype, comptime field_type: FieldTyp
                         .array => {
                             // Coerce `*[N]T` to `[]const T`.
                             const Slice = []const std.meta.Elem(ChildType);
-                            return self.writeWithFieldType(@as(Slice, val), field_type);
+                            return self.writeWithFieldLayout(@as(Slice, val), field_layout);
                         },
                         else => {
-                            return self.writeWithFieldType(val.*, field_type);
+                            return self.writeWithFieldLayout(val.*, field_layout);
                         },
                     };
                 },
                 .many, .slice => {
                     if (ptr_info.size == .many and ptr_info.sentinel() == null)
-                        @compileError("unable to syrupify type '" ++ @typeName(ValType) ++ "' without sentinel");
+                        @compileError("unable to serialize type '" ++ @typeName(T) ++ "' without sentinel");
                     const slice = if (ptr_info.size == .many) std.mem.span(val) else val;
-                    if (ptr_info.child == u8 and field_type != .sequence) {
-                        switch (field_type) {
+                    if (ptr_info.child == u8 and field_layout != .sequence) {
+                        switch (field_layout) {
                             .default, .string, .symbol, .data => {
-                                return self.writeBytesWithType(slice, field_type);
+                                return self.writeBytesWithLayout(slice, field_layout);
                             },
                             else => {},
                         }
                     }
 
-                    switch (field_type) {
+                    switch (field_layout) {
                         .sequence, .default => {
                             try self.writeSequenceStart();
                             for (slice) |item| {
-                                try self.writeWithFieldType(item, field_type);
+                                try self.writeWithFieldLayout(item, field_layout);
                             }
                             return self.writeSequenceEnd();
                         },
                         .set => {
                             try self.writeSetStart();
                             for (slice) |item| {
-                                try self.writeWithFieldType(item, field_type.set.toFieldType());
+                                try self.writeWithFieldLayout(item, field_layout.set.toFieldLayout());
                             }
                             return self.writeSetEnd();
                         },
-                        else => @compileError(std.fmt.comptimePrint("unsupported field type {s} for slice {s}. Dictionaries and sets cannot be safely serialized from slices due to non-uniqueness", .{ @tagName(field_type), @typeName(ValType) })),
+                        else => @compileError(std.fmt.comptimePrint("unsupported layout {s} for slice {s}. Dictionaries and sets cannot be safely serialized from slices due to non-uniqueness", .{ @tagName(field_layout), @typeName(T) })),
                     }
                 },
-                else => @compileError("unsupported pointer type " ++ @typeName(ValType)),
+                else => @compileError("unsupported pointer type " ++ @typeName(T)),
             },
-            else => @compileError("unsupported type! " ++ @typeName(ValType)),
+            else => @compileError("unsupported type! " ++ @typeName(T)),
         },
     };
 }
 
-/// Write a `Value`.
-pub fn writeValue(self: *Writer, gen: *const Value) WritingError!void {
+/// Write a `dynamic.Value`.
+pub fn writeDynamicValue(self: *Writer, gen: *const dynamic.Value) WritingError!void {
     return try switch (gen.*) {
         .true => self.writeBool(true),
         .false => self.writeBool(false),
@@ -642,10 +667,10 @@ pub fn writeValue(self: *Writer, gen: *const Value) WritingError!void {
             .i64 => |val| self.writeInt(val),
             .i128 => |val| self.writeInt(val),
         },
-        .sequence => |val| self.writeSequence(val),
-        .record => |val| self.writeRecord(&val),
-        .dictionary => |val| self.writeDictionary(val),
-        .set => |val| self.writeSet(val),
+        .sequence => |val| self.writeDynamicSequence(val),
+        .record => |val| self.writeDynamicRecord(&val),
+        .dictionary => |val| self.writeDynamicDictionary(val),
+        .set => |val| self.writeDynamicSet(val),
     };
 }
 
@@ -657,9 +682,9 @@ pub fn writeBool(self: *Writer, val: bool) FlatError!void {
 
 /// Write an integer value of any width.
 pub fn writeInt(self: *Writer, val: anytype) FlatError!void {
-    const ValType = @TypeOf(val);
-    const ValInfo = @typeInfo(ValType);
-    switch (ValInfo) {
+    const T = @TypeOf(val);
+    const type_info = @typeInfo(T);
+    switch (type_info) {
         .int => |i| {
             if (i.bits > 3400) {
                 @compileError(std.fmt.comptimePrint(
@@ -738,11 +763,11 @@ pub fn writeSequenceEnd(self: *Writer) SequenceError!void {
     try self.vtable.writeSequenceEnd(self.curWriter());
 }
 
-/// Write a full Sequence given a list of `Value`.
-pub fn writeSequence(self: *Writer, val: []const Value) WritingError!void {
+/// Write a full Sequence given a list of `dynamic.Value`.
+pub fn writeDynamicSequence(self: *Writer, val: []const dynamic.Value) WritingError!void {
     try self.writeSequenceStart();
     for (val) |gen| {
-        try self.writeValue(&gen);
+        try self.writeDynamicValue(&gen);
     }
     try self.writeSequenceEnd();
 }
@@ -758,14 +783,14 @@ pub fn writeRecordStart(self: *Writer) FlatError!void {
 /// Begin writing a Record given a label. The Record will be populated with subsequent writes.
 /// Call `writeRecordEnd` to finish the Record.
 pub fn writeRecordStartLabeled(self: *Writer, label: anytype) WritingError!void {
-    try self.writeRecordStartLabeledWithType(label, .default);
+    try self.writeRecordStartLabeledWithLayout(label, .default);
 }
 
-fn writeRecordStartLabeledWithType(self: *Writer, label: anytype, comptime field_type: FieldType) WritingError!void {
+fn writeRecordStartLabeledWithLayout(self: *Writer, label: anytype, comptime field_layout: FieldLayout) WritingError!void {
     try self.startWrite();
     try self.vtable.writeRecordStart(self.curWriter());
     try self.nested_datas.append(self.gpa, .{ .record = 0 });
-    try self.writeWithFieldType(label, if (field_type == .default) .symbol else field_type);
+    try self.writeWithFieldLayout(label, if (field_layout == .default) .symbol else field_layout);
 }
 
 pub const RecordError = FormatterError || NestingError || std.mem.Allocator.Error;
@@ -776,11 +801,11 @@ pub fn writeRecordEnd(self: *Writer) RecordError!void {
     try self.vtable.writeRecordEnd(self.curWriter());
 }
 
-/// Write a full Record.
-pub fn writeRecord(self: *Writer, val: *const Record) WritingError!void {
+/// Write a full `dynamic.Record`.
+pub fn writeDynamicRecord(self: *Writer, val: *const dynamic.Record) WritingError!void {
     try self.writeRecordStartLabeled(val.label);
     for (val.fields) |field| {
-        try self.writeValue(&field);
+        try self.writeDynamicValue(&field);
     }
     try self.writeRecordEnd();
 }
@@ -908,11 +933,11 @@ fn finalizeDictData(
     try self.maybeFlushBuffer();
 }
 
-/// Write a full Dictionary given a list of `Value`.
-pub fn writeDictionary(self: *Writer, val: []const Value) WritingError!void {
+/// Write a full Dictionary given a list of `dynamic.Value`.
+pub fn writeDynamicDictionary(self: *Writer, val: []const dynamic.Value) WritingError!void {
     try self.writeDictionaryStart();
     for (val) |gen| {
-        try self.writeValue(&gen);
+        try self.writeDynamicValue(&gen);
     }
     try self.writeDictionaryEnd();
 }
@@ -950,11 +975,11 @@ pub fn writeSetEnd(self: *Writer) SetError!void {
     try self.vtable.writeSetEnd(self.curWriter());
 }
 
-/// Write a full Set given a list of `Value`.
-pub fn writeSet(self: *Writer, val: []const Value) WritingError!void {
+/// Write a full Set given a list of `dynamic.Value`.
+pub fn writeDynamicSet(self: *Writer, val: []const dynamic.Value) WritingError!void {
     try self.writeSetStart();
     for (val) |gen| {
-        try self.writeValue(&gen);
+        try self.writeDynamicValue(&gen);
     }
     try self.writeSetEnd();
 }
@@ -1027,14 +1052,14 @@ fn maybeFlushBuffer(self: *Writer) FormatterError!void {
     }
 }
 
-/// Enum for specifying the type to use when serializing a Zig field to Syrup.
-pub const FieldType = union(enum) {
-    /// Simplified field type for types that are used inside Dictionaries and Maps.
+/// Enum for specifying the layout to use when serializing a Zig field to Syrup.
+pub const FieldLayout = union(enum) {
+    /// Simplified layout settings for types that are used inside Dictionaries and Maps.
     ///
     /// Note: If you need to customize settings for a Dictionary that contains a Set or a Dictionary,
-    /// that's not possible this way, because of circular dependencies in the `FieldType` union.
-    /// In the future a `syrupify` function will be used for custom serialization of complex types.
-    pub const SimpleFieldType = enum {
+    /// that's not possible this way, because of circular dependencies in the `FieldLayout` union.
+    /// Define a `syrupify` function on the type for custom serialization of complex types.
+    pub const Simple = enum {
         /// The field is serialized with the default options.
         /// `[]const u8` fields are serialized as strings by default.
         /// `[]const u8` keys for Sets and Dictionaries, and values for Dictionaries are serialized as strings by default.
@@ -1050,7 +1075,7 @@ pub const FieldType = union(enum) {
         /// array-like field serialized as a sequence.
         sequence,
 
-        pub fn toFieldType(comptime self: SimpleFieldType) FieldType {
+        pub fn toFieldLayout(comptime self: Simple) FieldLayout {
             return switch (self) {
                 .default => .default,
                 .string => .string,
@@ -1061,16 +1086,30 @@ pub const FieldType = union(enum) {
         }
     };
 
-    /// Field type for Dictionaries, containing both a key and a value type.
+    /// Layout settings for Dictionaries, containing both key and value `Simple` layouts.
     ///
     /// Note: If you need to customize settings for a Dictionary that contains a Set or a Dictionary,
-    /// that's not possible this way, because of circular dependencies in the `FieldType` union.
-    /// In the future a `syrupify` function will be used for custom serialization of complex types.
-    pub const DictionaryFieldType = struct {
+    /// that's not possible this way, because of circular dependencies in the `FieldLayout` union.
+    /// Define a `syrupify` function on the type to custom serialize.
+    pub const Dictionary = struct {
         /// The type of the key for the dictionary.
-        key: SimpleFieldType = .default,
+        key: Simple = .default,
         /// The type of the value for the dictionary.
-        value: SimpleFieldType = .default,
+        value: Simple = .default,
+    };
+
+    /// Custom Syrup layout for enums.
+    const Enum = struct {
+        const Type = enum {
+            string,
+            symbol,
+            data,
+        };
+
+        /// The string type to use for the enum's value.
+        type: Type = .string,
+        /// If true, the type of the enum will be prefixed as part of the value, e.g. "Foo.one", "Foo.2" (for non-exhaustive).
+        include_type_name: bool = false,
     };
 
     /// The field is serialized with the default options.
@@ -1088,39 +1127,45 @@ pub const FieldType = union(enum) {
     /// Single array-like field serialized as a sequence.
     sequence,
     /// The field is a dictionary.
-    dictionary: DictionaryFieldType,
-    /// The field is a set of the given field type.
-    set: SimpleFieldType,
+    dictionary: Dictionary,
+    /// The field is a set of the given `Simple` layout.
+    set: Simple,
+    /// The field is an enum.
+    @"enum": Enum,
 };
 
-/// A structure that can be defined as a compile time constant in a structure with the name `wire_format`.
-/// This will be detected at compile time and used to determine the types to use when serializing bytes.
-pub const WireFormat = struct {
-    /// Structure for defining the layout for Zig struct when serialized to Syrup.
-    const ContainerLayout = union(enum) {
-        /// Options for when a Zig struct is serialized as a Syrup Record.
-        pub const RecordOptions = struct {
-            /// Name to use for the struct in the Record's label.
-            name: ?[]const u8 = null,
-            /// The type to use for the record's label.
-            label: FieldType = .symbol,
-        };
+const syrup_format = "syrup_format";
 
-        /// Serialize the structure as a Record, with the specified `FieldType` as the type of the record' label. The label's value will be the type name of the struct.
-        record: RecordOptions,
-        /// Serialize the structure's fields as a sequence without emitting the structure's type name or the field names.
-        sequence,
-        /// Serialize the structure's fields as a dictionary without emitting the structure's type name. The specified `FieldType` is the type to use for each field's name.
-        dictionary: FieldType,
+/// Defines the layout for a Zig struct when serialized to Syrup.
+const ContainerLayout = union(enum) {
+    /// Options for when a Zig struct is serialized as a Syrup Record.
+    pub const Record = struct {
+        /// Name to use for the struct in the Record's label.
+        name: ?[]const u8 = null,
+        /// The type to use for the record's label.
+        label: FieldLayout = .symbol,
     };
 
-    /// The layout that the structure is serialized in.
-    layout: ContainerLayout = .{ .dictionary = .default },
-    /// List of types to use for each field. The length must match the number of fields in the structure.
-    fields: ?[]const FieldType = null,
+    /// Serialize the structure as a Record, with the `Record` value as the settings. The label's value will be the type name of the struct.
+    record: Record,
+    /// Serialize the structure's fields as a sequence without emitting the structure's type name or the field names.
+    sequence,
+    /// Serialize the structure's fields as a dictionary without emitting the structure's type name. The specified `FieldLayout` is the type to use for each field's name.
+    dictionary: FieldLayout,
 };
 
-/// While not strictly necessary, this function acts as an assertion that all nested structures have been written properly. Run it when the structure is done being written.
+/// Defines the layout and field settings for a Zig struct.
+/// When a const declaration of type `WireFormat` named `syrup_format` is present in a Struct, the
+/// layout and field settings specified in it will be applied when serializing.
+pub const WireFormat = struct {
+    /// The layout that the structure is serialized in.
+    layout: ContainerLayout = .{ .dictionary = .default },
+    /// List of layouts to use for each field. The length must match the number of fields in the structure.
+    fields: ?[]const FieldLayout = null,
+};
+
+/// While not strictly necessary, this function can be used to assert that all nested structures have been
+/// written properly. Run it when the structure is done being written.
 pub fn finish(self: *Writer) error{NotFinished}!void {
     if (self.nested_datas.items.len > 0) {
         return error.NotFinished;
@@ -1198,7 +1243,7 @@ test "symbol datatype" {
 }
 
 test "sequence datatype" {
-    const sequence = [_]Value{
+    const sequence = [_]dynamic.Value{
         .{ .string = "a test" },
         .{ .int = .{ .i32 = 45 } },
         .{ .symbol = "shark" },
@@ -1254,7 +1299,7 @@ test writeRecordStartLabeled {
     defer output.deinit();
     defer writer.deinit();
 
-    try writer.writeRecordStartLabeled(Value{ .sequence = &[_]Value{
+    try writer.writeRecordStartLabeled(dynamic.Value{ .sequence = &[_]dynamic.Value{
         .{ .string = "hi" },
     } });
     try writer.writeBool(true);
@@ -1272,14 +1317,14 @@ test "record datatype" {
     defer output.deinit();
     defer writer.deinit();
 
-    const record = Record{
+    const record = dynamic.Record{
         .label = &.{
-            .sequence = &[_]Value{
+            .sequence = &[_]dynamic.Value{
                 .{ .string = "hello" },
                 .{ .int = .{ .i32 = 2456 } },
             },
         },
-        .fields = &[_]Value{
+        .fields = &[_]dynamic.Value{
             .true,
             .false,
             .{ .symbol = "dogs-and-cats" },
@@ -1297,8 +1342,8 @@ test "simple dictionary datatype" {
     defer output.deinit();
     defer writer.deinit();
 
-    const dict = Value{
-        .dictionary = &[_]Value{
+    const dict = dynamic.Value{
+        .dictionary = &[_]dynamic.Value{
             .{ .string = "key2" },
             .{ .int = .{ .i32 = 45 } },
             .{ .string = "key1" },
@@ -1325,17 +1370,17 @@ test "nested dictionary datatype" {
     // Dictionary which has *nested* dictionaries as a key (gross, but allowed)
     // and a dictionary as a value for fun as well.
     // Let's hope this is not something someone would want to do, but at least it's possible.
-    const dict = Value{
-        .dictionary = &[_]Value{
-            .{ .dictionary = &[_]Value{
-                .{ .dictionary = &[_]Value{
+    const dict = dynamic.Value{
+        .dictionary = &[_]dynamic.Value{
+            .{ .dictionary = &[_]dynamic.Value{
+                .{ .dictionary = &[_]dynamic.Value{
                     .{ .int = .{ .i32 = 100 } },
                     .{ .int = .{ .i32 = 88888 } },
                     .{ .int = .{ .i32 = 99 } },
                     .{ .int = .{ .i32 = 99999 } },
                 } },
                 .{ .string = "hello world" },
-                .{ .dictionary = &[_]Value{
+                .{ .dictionary = &[_]dynamic.Value{
                     .{ .int = .{ .i32 = 33 } },
                     .{ .int = .{ .i32 = 55555 } },
                     .{ .int = .{ .i32 = 508 } },
@@ -1366,17 +1411,17 @@ test "ensure dictionaries don't allow duplicate keys" {
     defer writer.deinit();
 
     // Same complex nested dictionary, but it has a problem, a duplicate key deep in the nesting.
-    const dict = Value{
-        .dictionary = &[_]Value{
-            .{ .dictionary = &[_]Value{
-                .{ .dictionary = &[_]Value{
+    const dict = dynamic.Value{
+        .dictionary = &[_]dynamic.Value{
+            .{ .dictionary = &[_]dynamic.Value{
+                .{ .dictionary = &[_]dynamic.Value{
                     .{ .int = .{ .i32 = 99 } },
                     .{ .int = .{ .i32 = 88888 } },
                     .{ .int = .{ .i32 = 99 } },
                     .{ .int = .{ .i32 = 99999 } },
                 } },
                 .{ .string = "hello world" },
-                .{ .dictionary = &[_]Value{
+                .{ .dictionary = &[_]dynamic.Value{
                     .{ .int = .{ .i32 = 33 } },
                     .{ .int = .{ .i32 = 55555 } },
                     .{ .int = .{ .i32 = 508 } },
@@ -1403,7 +1448,7 @@ test "ensure the user entered a value for every dictionary entry" {
     defer output.deinit();
     defer writer.deinit();
 
-    const dict = Value{ .dictionary = &[_]Value{
+    const dict = dynamic.Value{ .dictionary = &[_]dynamic.Value{
         .{ .symbol = "one" },
         .{ .int = .{ .i32 = 45 } },
         .{ .symbol = "two" },
@@ -1418,8 +1463,8 @@ test "simple set" {
     defer output.deinit();
     defer writer.deinit();
 
-    const set = Value{
-        .set = &[_]Value{
+    const set = dynamic.Value{
+        .set = &[_]dynamic.Value{
             .{ .symbol = "one" },
             .{ .symbol = "five" },
             .{ .symbol = "two" },
@@ -1437,7 +1482,7 @@ test "same octets with shorter length come first" {
     defer output.deinit();
     defer writer.deinit();
 
-    const set = Value{ .set = &[_]Value{
+    const set = dynamic.Value{ .set = &[_]dynamic.Value{
         .{ .int = .{ .i32 = 234 } },
         .{ .int = .{ .i32 = 2342356 } },
     } };
@@ -1454,16 +1499,16 @@ test "complex set" {
     defer output.deinit();
     defer writer.deinit();
 
-    const set = Value{
-        .set = &[_]Value{
+    const set = dynamic.Value{
+        .set = &[_]dynamic.Value{
             .{ .symbol = "one" },
             .{ .int = .{ .i64 = 2342356 } },
-            .{ .dictionary = &[_]Value{
+            .{ .dictionary = &[_]dynamic.Value{
                 .{ .f64 = 67.98 },
                 .{ .f64 = 67.89 },
                 .{ .data = "boop" },
                 .{ .f64 = 99.999 },
-                .{ .set = &[_]Value{
+                .{ .set = &[_]dynamic.Value{
                     .{ .string = "hey" },
                     .{ .string = "there" },
                 } },
@@ -1490,8 +1535,8 @@ test "ensure sets don't allow duplicate entries" {
     defer output.deinit();
     defer writer.deinit();
 
-    const set = Value{
-        .set = &[_]Value{
+    const set = dynamic.Value{
+        .set = &[_]dynamic.Value{
             .{ .symbol = "one" },
             .{ .symbol = "five" },
             .{ .symbol = "five" },
@@ -1515,13 +1560,13 @@ test "detection of mismatched nesting levels" {
 }
 
 test "The Grand Menagerie (ocapn spec test data)" {
-    const menagerie = Value{
+    const menagerie = dynamic.Value{
         .record = .{
             .label = &.{ .data = "zoo" },
-            .fields = &[_]Value{
+            .fields = &[_]dynamic.Value{
                 .{ .string = "The Grand Menagerie" },
-                .{ .sequence = &[_]Value{
-                    .{ .dictionary = &[_]Value{
+                .{ .sequence = &[_]dynamic.Value{
+                    .{ .dictionary = &[_]dynamic.Value{
                         .{ .symbol = "species" },
                         .{ .data = "cat" },
                         .{ .symbol = "name" },
@@ -1533,13 +1578,13 @@ test "The Grand Menagerie (ocapn spec test data)" {
                         .{ .symbol = "alive?" },
                         .true,
                         .{ .symbol = "eats" },
-                        .{ .set = &[_]Value{
+                        .{ .set = &[_]dynamic.Value{
                             .{ .data = "mice" },
                             .{ .data = "fish" },
                             .{ .data = "kibble" },
                         } },
                     } },
-                    .{ .dictionary = &[_]Value{
+                    .{ .dictionary = &[_]dynamic.Value{
                         .{ .symbol = "species" },
                         .{ .data = "monkey" },
                         .{ .symbol = "name" },
@@ -1551,12 +1596,12 @@ test "The Grand Menagerie (ocapn spec test data)" {
                         .{ .symbol = "alive?" },
                         .false,
                         .{ .symbol = "eats" },
-                        .{ .set = &[_]Value{
+                        .{ .set = &[_]dynamic.Value{
                             .{ .data = "bananas" },
                             .{ .data = "insects" },
                         } },
                     } },
-                    .{ .dictionary = &[_]Value{
+                    .{ .dictionary = &[_]dynamic.Value{
                         .{ .symbol = "species" },
                         .{ .data = "ghost" },
                         .{ .symbol = "name" },
@@ -1568,7 +1613,7 @@ test "The Grand Menagerie (ocapn spec test data)" {
                         .{ .symbol = "alive?" },
                         .false,
                         .{ .symbol = "eats" },
-                        .{ .set = &[0]Value{} },
+                        .{ .set = &[0]dynamic.Value{} },
                     } },
                 } },
             },
@@ -1587,7 +1632,7 @@ test "The Grand Menagerie (ocapn spec test data)" {
 
 const MyStruct = struct {
     const Coord = struct {
-        const wire_format = WireFormat{
+        const syrup_format = WireFormat{
             .layout = .sequence,
         };
 
@@ -1595,9 +1640,9 @@ const MyStruct = struct {
         lon: f64,
     };
 
-    const wire_format = WireFormat{
+    const syrup_format = WireFormat{
         .layout = .{ .record = .{ .label = .string } },
-        .fields = &[_]FieldType{
+        .fields = &[_]FieldLayout{
             .string,
             .symbol,
             .default,
@@ -1653,7 +1698,7 @@ const TestSet = std.StaticStringMap(void);
 const TestKVSet = struct { []const u8 };
 
 const Zoo = struct {
-    const wire_format = WireFormat{
+    const syrup_format = WireFormat{
         .layout = .{
             .record = .{
                 .name = "zoo",
@@ -1663,9 +1708,9 @@ const Zoo = struct {
     };
 
     const Animal = struct {
-        const wire_format = WireFormat{
+        const syrup_format = WireFormat{
             .layout = .{ .dictionary = .symbol },
-            .fields = &[_]FieldType{
+            .fields = &[_]FieldLayout{
                 .data,
                 .string,
                 .default,
@@ -1766,13 +1811,13 @@ test "small buffer/resize to catch realloc bugs" {}
 const zoo_jsyrup = @embedFile("test-data/zoo.jsyrup");
 
 test "Grand Menagerie in JSyrup" {
-    const menagerie = Value{
+    const menagerie = dynamic.Value{
         .record = .{
             .label = &.{ .data = "zoo" },
-            .fields = &[_]Value{
+            .fields = &[_]dynamic.Value{
                 .{ .string = "The Grand Menagerie" },
-                .{ .sequence = &[_]Value{
-                    .{ .dictionary = &[_]Value{
+                .{ .sequence = &[_]dynamic.Value{
+                    .{ .dictionary = &[_]dynamic.Value{
                         .{ .symbol = "species" },
                         .{ .data = "cat" },
                         .{ .symbol = "name" },
@@ -1784,13 +1829,13 @@ test "Grand Menagerie in JSyrup" {
                         .{ .symbol = "alive?" },
                         .true,
                         .{ .symbol = "eats" },
-                        .{ .set = &[_]Value{
+                        .{ .set = &[_]dynamic.Value{
                             .{ .data = "mice" },
                             .{ .data = "fish" },
                             .{ .data = "kibble" },
                         } },
                     } },
-                    .{ .dictionary = &[_]Value{
+                    .{ .dictionary = &[_]dynamic.Value{
                         .{ .symbol = "species" },
                         .{ .data = "monkey" },
                         .{ .symbol = "name" },
@@ -1802,12 +1847,12 @@ test "Grand Menagerie in JSyrup" {
                         .{ .symbol = "alive?" },
                         .false,
                         .{ .symbol = "eats" },
-                        .{ .set = &[_]Value{
+                        .{ .set = &[_]dynamic.Value{
                             .{ .data = "bananas" },
                             .{ .data = "insects" },
                         } },
                     } },
-                    .{ .dictionary = &[_]Value{
+                    .{ .dictionary = &[_]dynamic.Value{
                         .{ .symbol = "species" },
                         .{ .data = "ghost" },
                         .{ .symbol = "name" },
@@ -1819,7 +1864,7 @@ test "Grand Menagerie in JSyrup" {
                         .{ .symbol = "alive?" },
                         .false,
                         .{ .symbol = "eats" },
-                        .{ .set = &[0]Value{} },
+                        .{ .set = &[0]dynamic.Value{} },
                     } },
                 } },
             },
@@ -1865,4 +1910,62 @@ test "tuples and compiler-generated structs" {
         .garbage_collected = false,
     } } });
     try std.testing.expectEqualStrings("{`interests`: [\"ocapn\", \"goblins\", \"spritely\", \"music\"], `languages`: [{`garbage_collected`: true, `name`: \"guile\"}, {`garbage_collected`: false, `name`: \"zig\"}], `name`: \"vivi\"}", output.written());
+}
+
+const TestEnum = enum {
+    one,
+    @"test",
+    after,
+    another,
+};
+
+test "enum" {
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    var writer = Writer.init(&output.writer, std.testing.allocator);
+    defer output.deinit();
+    defer writer.deinit();
+
+    try writer.write(.{ TestEnum.one, TestEnum.another });
+    try std.testing.expectEqualStrings("[3'one7'another]", output.written());
+}
+
+const CustomTestEnum = enum {
+    const syrup_format = EnumLayout{ .type = .string };
+
+    one,
+    @"test",
+    after,
+    another,
+};
+
+const FancyCustomEnum = enum {
+    const syrup_format = EnumLayout{
+        .type = .data,
+        .include_type_name = true,
+    };
+
+    one,
+    @"\"test",
+    after,
+    another,
+};
+
+test "enum with custom layout" {
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    var writer = Writer.initJSyrup(&output.writer, std.testing.allocator);
+    defer output.deinit();
+    defer writer.deinit();
+
+    try writer.write(.{ CustomTestEnum.one, FancyCustomEnum.@"\"test" });
+    try std.testing.expectEqualStrings("[3'one21:FancyCustomEnum.\\\"test]", output.written());
+}
+
+test "enum literal" {
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    var writer = Writer.initJSyrup(&output.writer, std.testing.allocator);
+    defer output.deinit();
+    defer writer.deinit();
+
+    try writer.write(.{ .@"`title`" = "How to run", .text = "\tRun the \"Copy\" command.\n" });
+    try std.testing.expectEqualStrings("{`\\`title\\``: \"How to run\", `text`: \"\\tRun the \\\"Copy\\\" command.\\n\"}", output.written());
 }
