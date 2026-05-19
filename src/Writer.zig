@@ -192,18 +192,26 @@ const JSyrupFormatter = struct {
         try base32.encodeSlice(val, writer, .{});
         try writer.writeByte(tags.jsyrup.Data);
     }
-    fn writeEscapedChar(writer: *std.Io.Writer, char: u8) FormatterError!void {
-        try writer.writeByte('\\');
-        try writer.writeByte(char);
+
+    pub inline fn escapedChar(char: u8) []const u8 {
+        return switch (char) {
+            '"' => "\\\"",
+            '\\' => "\\\\",
+            '/' => "\\/",
+            '\u{0008}' => "\\b",
+            '\u{000C}' => "\\f",
+            '\n' => "\\n",
+            '\r' => "\\r",
+            '\t' => "\\t",
+            else => &[_]u8{char},
+        };
     }
+
     pub fn writeString(writer: *std.Io.Writer, val: []const u8) FormatterError!void {
         try writer.writeByte(tags.jsyrup.String);
         var i: usize = 0;
         while (i < val.len) : (i += 1) {
-            switch (val[i]) {
-                '"', '\\', '/', '\u{0008}', '\u{000C}', '\n', '\r', '\t' => try writeEscapedChar(writer, val[i]),
-                else => try writer.writeByte(val[i]),
-            }
+            try writer.writeAll(if (val[i] == '"') "\\\"" else escapedChar(val[i]));
         }
         try writer.writeByte(tags.jsyrup.String);
     }
@@ -211,10 +219,7 @@ const JSyrupFormatter = struct {
         try writer.writeByte(tags.jsyrup.Symbol);
         var i: usize = 0;
         while (i < val.len) : (i += 1) {
-            switch (val[i]) {
-                '`', '\\', '/', '\u{0008}', '\u{000C}', '\n', '\r', '\t' => try writeEscapedChar(writer, val[i]),
-                else => try writer.writeByte(val[i]),
-            }
+            try writer.writeAll(if (val[i] == '`') "\\`" else escapedChar(val[i]));
         }
         try writer.writeByte(tags.jsyrup.Symbol);
     }
@@ -518,7 +523,15 @@ fn writeWithFieldType(self: *Writer, val: anytype, comptime field_type: FieldTyp
                     }
                 }
 
-                if (!has_wire_format or ValType.wire_format.layout == .record) {
+                // Tuples default to a sequence.
+                const write_sequence = (!has_wire_format and structure.is_tuple) or
+                    (has_wire_format and ValType.wire_format.layout == .sequence);
+                if (write_sequence) {
+                    try self.writeSequenceStart();
+                } else if (!has_wire_format or ValType.wire_format.layout == .dictionary) {
+                    // Other structs default to a dictionary.
+                    try self.writeDictionaryStart();
+                } else if (ValType.wire_format.layout == .record) {
                     const record_label_type: FieldType = if (has_wire_format)
                         ValType.wire_format.layout.record.label
                     else
@@ -530,18 +543,15 @@ fn writeWithFieldType(self: *Writer, val: anytype, comptime field_type: FieldTyp
                         TypeName;
 
                     try self.writeRecordStartLabeledWithType(type_name, record_label_type);
-                } else {
-                    switch (ValType.wire_format.layout) {
-                        .sequence => try self.writeSequenceStart(),
-                        .dictionary => try self.writeDictionaryStart(),
-                        .record => {},
-                    }
                 }
 
                 comptime var i = 0;
                 inline for (structure.fields) |Field| {
-                    if (has_wire_format and ValType.wire_format.layout == .dictionary) {
-                        try self.writeWithFieldType(Field.name, ValType.wire_format.layout.dictionary);
+                    if (!write_sequence and
+                        (!has_wire_format or ValType.wire_format.layout == .dictionary))
+                    {
+                        // Default to symbols as dictionary keys
+                        try self.writeWithFieldType(Field.name, if (has_wire_format) ValType.wire_format.layout.dictionary else .symbol);
                     }
 
                     const ft = if (has_wire_format)
@@ -556,14 +566,12 @@ fn writeWithFieldType(self: *Writer, val: anytype, comptime field_type: FieldTyp
                     i += 1;
                 }
 
-                if (!has_wire_format or ValType.wire_format.layout == .record) {
-                    return self.writeRecordEnd();
+                if (write_sequence) {
+                    return self.writeSequenceEnd();
+                } else if (!has_wire_format or ValType.wire_format.layout == .dictionary) {
+                    return self.writeDictionaryEnd();
                 } else {
-                    switch (ValType.wire_format.layout) {
-                        .sequence => return self.writeSequenceEnd(),
-                        .dictionary => return self.writeDictionaryEnd(),
-                        .record => {},
-                    }
+                    return self.writeRecordEnd();
                 }
             },
             .pointer => |ptr_info| switch (ptr_info.size) {
@@ -1107,7 +1115,7 @@ pub const WireFormat = struct {
     };
 
     /// The layout that the structure is serialized in.
-    layout: ContainerLayout = .{ .record = .{} },
+    layout: ContainerLayout = .{ .dictionary = .default },
     /// List of types to use for each field. The length must match the number of fields in the structure.
     fields: ?[]const FieldType = null,
 };
@@ -1579,6 +1587,10 @@ test "The Grand Menagerie (ocapn spec test data)" {
 
 const MyStruct = struct {
     const Coord = struct {
+        const wire_format = WireFormat{
+            .layout = .sequence,
+        };
+
         lat: f64,
         lon: f64,
     };
@@ -1629,10 +1641,10 @@ test "wire format" {
             42,
             45,
             46,
-        } ++ "[42+69+67+]<21'Writer.MyStruct.Coord" ++
+        } ++ "[42+69+67+][" ++
             "D" ++ .{ 64, 70, 158, 118, 200, 180, 57, 88 } ++
             "D" ++ .{ 64, 140, 216, 253, 239, 253, 83, 125 } ++
-            ">>",
+            "]>",
         output.written(),
     );
 }
@@ -1822,4 +1834,35 @@ test "Grand Menagerie in JSyrup" {
     try writer.write(&menagerie);
 
     try std.testing.expectEqualStrings(zoo_jsyrup, output.written());
+}
+
+test "jsyrup with escaped characters" {
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    var writer = Writer.initJSyrup(&output.writer, std.testing.allocator);
+    defer output.deinit();
+    defer writer.deinit();
+
+    try writer.write(.{ .@"`title`" = "How to run", .text = "\tRun the \"Copy\" command.\n" });
+    try std.testing.expectEqualStrings("{`\\`title\\``: \"How to run\", `text`: \"\\tRun the \\\"Copy\\\" command.\\n\"}", output.written());
+}
+
+test "tuples and compiler-generated structs" {
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    var writer = Writer.initJSyrup(&output.writer, std.testing.allocator);
+    defer output.deinit();
+    defer writer.deinit();
+
+    try writer.write(.{ .name = "vivi", .interests = .{
+        "ocapn",
+        "goblins",
+        "spritely",
+        "music",
+    }, .languages = .{ .{
+        .name = "guile",
+        .garbage_collected = true,
+    }, .{
+        .name = "zig",
+        .garbage_collected = false,
+    } } });
+    try std.testing.expectEqualStrings("{`interests`: [\"ocapn\", \"goblins\", \"spritely\", \"music\"], `languages`: [{`garbage_collected`: true, `name`: \"guile\"}, {`garbage_collected`: false, `name`: \"zig\"}], `name`: \"vivi\"}", output.written());
 }
