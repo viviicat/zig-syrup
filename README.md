@@ -71,6 +71,7 @@ Zig Types that can be (de)serialized to Syrup
 - [x] tuples
 - [ ] error sets
 - [x] general pointers
+- [x] `dynamic.Value`
 
 ### Reader
 
@@ -90,6 +91,7 @@ Zig Types that can be (de)serialized to Syrup
 - [ ] unions
 - [ ] tuples
 - [ ] general pointers
+- [ ] `dynamic.Value`
 
 ## Benchmark
 
