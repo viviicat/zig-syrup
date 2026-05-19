@@ -344,6 +344,8 @@ pub fn init(underlying_writer: *std.Io.Writer, gpa: std.mem.Allocator) Writer {
 }
 
 /// Initialize a `Writer` that writes to `jsyrup` format instead of `syrup`.
+///
+/// JSyrup is a json-like human readable format of Syrup, that is not meant to be used as a wire protocol. It does not have stable round-trip properties. Meant for debugging and printing information about Syrup structure.
 pub fn initJSyrup(underlying_writer: *std.Io.Writer, gpa: std.mem.Allocator) Writer {
     return .{
         .underlying_writer = underlying_writer,
@@ -483,7 +485,7 @@ pub fn write(self: *Writer, val: anytype, comptime options: Options) WritingErro
                             const key_options = Options{
                                 .format = .{
                                     .simple = if (options.format == .dictionary)
-                                        options.format.dictionary.key
+                                        options.format.dictionary.keys
                                     else
                                         .default,
                                 },
@@ -492,7 +494,7 @@ pub fn write(self: *Writer, val: anytype, comptime options: Options) WritingErro
                             const value_options = Options{
                                 .format = .{
                                     .simple = if (options.format == .dictionary)
-                                        options.format.dictionary.value
+                                        options.format.dictionary.values
                                     else
                                         .default,
                                 },
@@ -519,7 +521,7 @@ pub fn write(self: *Writer, val: anytype, comptime options: Options) WritingErro
                     }
                 }
 
-                const has_syrup_format = @hasDecl(T, "syrup_format");
+                const has_syrup_format = @hasDecl(T, syrup_format);
                 if (has_syrup_format and @TypeOf(T.syrup_format) != WireFormat) {
                     @compileError("`syrup_format` declaration found in struct " ++ type_name ++ ", but it is type " ++ @typeName(T.syrup_format) ++ ". Must be " ++ @typeInfo(WireFormat) ++ ".");
                 }
@@ -571,7 +573,7 @@ pub fn write(self: *Writer, val: anytype, comptime options: Options) WritingErro
                             .{
                                 .format = .{
                                     .simple = if (has_syrup_format)
-                                        T.syrup_format.format.dictionary.key
+                                        T.syrup_format.format.dictionary.keys
                                     else
                                         .symbol,
                                 },
@@ -583,7 +585,7 @@ pub fn write(self: *Writer, val: anytype, comptime options: Options) WritingErro
                         if (T.syrup_format.fields) |field_formats|
                             field_formats[i]
                         else if (T.syrup_format.format == .dictionary)
-                            T.syrup_format.format.dictionary.value
+                            T.syrup_format.format.dictionary.values
                         else
                             .default
                     else
@@ -786,7 +788,9 @@ pub fn writeSymbol(self: *Writer, val: []const u8) FlatError!void {
     try self.vtable.writeSymbol(self.curWriter(), val);
 }
 
-/// Begin writing a Sequence. The Sequence will be populated with subsequent writes.
+/// Begin writing a Sequence.
+///
+/// The Sequence will be populated with subsequent writes.
 /// Call `writeSequenceEnd` to finish the Sequence.
 pub fn writeSequenceStart(self: *Writer) FlatError!void {
     try self.startWrite();
@@ -833,7 +837,9 @@ pub fn writeRecordStart(self: *Writer) FlatError!void {
     try self.nested_datas.append(self.gpa, .{ .record = 0 });
 }
 
-/// Begin writing a Record given a label. The Record will be populated with subsequent writes.
+/// Begin writing a Record given a label.
+///
+/// The Record will be populated with subsequent writes.
 /// Call `writeRecordEnd` to finish the Record.
 pub fn writeRecordStartLabeled(self: *Writer, label: anytype) WritingError!void {
     try self.writeRecordStartLabeledOptions(label, .{});
@@ -854,7 +860,9 @@ fn writeRecordStartLabeledOptions(self: *Writer, label: anytype, comptime option
 
 pub const RecordError = FormatterError || NestingError || std.mem.Allocator.Error;
 
-/// Finish writing a Record. Throws `RecordUnderflow` if we aren't in any records.
+/// Finish writing a Record.
+///
+/// Throws `RecordUnderflow` if we aren't in any records.
 pub fn writeRecordEnd(self: *Writer) RecordError!void {
     try self.ensureProperNesting(.record, error.RecordUnderflow);
     try self.vtable.writeRecordEnd(self.curWriter());
@@ -873,7 +881,9 @@ fn tmpWrittenLen(self: *Writer) usize {
     return self.tmp_writer.written().len;
 }
 
-/// Begin writing a Dictionary of data. `tmp_writer` will be filled with subsequent writes of
+/// Begin writing a Dictionary of data.
+///
+/// `tmp_writer` will be filled with subsequent writes of
 /// (alternately) keys and values, until the dictionary is complete.
 /// Call `writeDictionaryEnd` to finish the Dictionary.
 pub fn writeDictionaryStart(self: *Writer) FlatError!void {
@@ -909,7 +919,10 @@ fn sortIndices(self: *Writer, dict_data: *DictData) SortingError!void {
 }
 
 pub const DictionaryError = FormatterError || DictDataError || error{ NestingMismatch, DictionaryUnderflow, DictionaryMissingValue };
-/// Finish writing a Dictionary. Throws `DictionaryUnderflow` if we aren't in any dictionaries.
+
+/// Finish writing a Dictionary.
+///
+/// Throws `DictionaryUnderflow` if we aren't in any dictionaries.
 /// This sorts entries by key and then (unless we are still inside an outer Dictionary or Set) performs
 /// the actual flush of keys and values to the underlying writer, as previous calls will have
 /// only populated `tmp_writer` with items.
@@ -1001,7 +1014,9 @@ pub fn writeDynamicDictionary(self: *Writer, val: []const dynamic.Value) Writing
     try self.writeDictionaryEnd();
 }
 
-/// Begin writing a Set of data. `tmp_writer` will be filled with subsequent writes of
+/// Begin writing a Set of data.
+///
+/// `tmp_writer` will be filled with subsequent writes of
 /// entries, until the set is complete.
 /// Call `writeSetEnd` to finish the Set.
 pub fn writeSetStart(self: *Writer) FlatError!void {
@@ -1012,7 +1027,9 @@ pub fn writeSetStart(self: *Writer) FlatError!void {
 }
 
 pub const SetError = FormatterError || error{ DuplicateEntryFound, NestingMismatch, SetUnderflow } || std.mem.Allocator.Error;
-/// Finish writing a Set. Throws `SetUnderflow` if we aren't in any sets.
+/// Finish writing a Set.
+///
+/// Throws `SetUnderflow` if we aren't in any sets.
 /// This sorts entries and then (unless we are still inside an outer Dictionary or Set) performs
 /// the actual flush of items to the underlying writer, as previous calls will have
 /// only populated `tmp_writer` with items.
@@ -1043,7 +1060,9 @@ pub fn writeDynamicSet(self: *Writer, val: []const dynamic.Value) WritingError!v
     try self.writeSetEnd();
 }
 
-/// Start a write operation. We record index positions if we are in a Dictionary or Set.
+/// Start a write operation.
+///
+/// We record index positions if we are in a Dictionary or Set.
 fn startWrite(self: *Writer) FlatError!void {
     if (self.nested_datas.items.len <= 0) {
         return;
@@ -1113,50 +1132,89 @@ fn maybeFlushBuffer(self: *Writer) FormatterError!void {
 
 const syrup_format = "syrup_format";
 
+/// Options for `write`.
 pub const Options = struct {
+    /// The `Format` to use for the structure.
     format: Format = .default,
 };
 
+/// Custom wire format of a struct and its fields.
+/// Define a `syrup_format` constant with this type inside a struct to customize it.
 pub const WireFormat = struct {
+    /// The `Format.Struct` to use for this struct.
     format: Format.Struct = .{ .dictionary = .{} },
+    /// The list of `Format` settings for each field, in order. Count must match the field count.
     fields: ?[]const Format = null,
 };
 
+/// Custom format specification for a type.
+///
+/// This lets you customize how Zig types are saved in Syrup format,
+/// including whether to use save byte slices as strings, symbols or data, and what container to store structs in.
+/// The system is very flexible and gives you granular control over how a type should be specified. The goal is to
+/// make it easy to implement an externally-specified Syrup model.
+///
+/// You can specify a value of `Format` in the `options` argument of `write`, or customize an existing struct with a `WireFormat` declaration.
 pub const Format = union(enum) {
+    /// Format specification for strings and primitives.
     pub const Simple = enum {
+        /// Perform the default behavior.
         default,
+        /// Write as a string.
         string,
+        /// Write as a symbol.
         symbol,
+        /// Write as data.
         data,
     };
 
+    /// Format specification for a dictionary type.
     pub const Dictionary = struct {
-        key: Simple = .default,
-        value: Simple = .default,
+        /// The format of the dictionary keys.
+        keys: Simple = .default,
+        /// The format of the dictionary values.
+        values: Simple = .default,
     };
 
+    /// Format specification for a record type.
     pub const Record = struct {
+        /// The format of the record's label.
         label: Simple = .symbol,
+        /// Custom name for the record (will appear as the label).
         name: ?[]const u8 = null,
     };
 
+    /// Format specification for a struct type.
     pub const Struct = union(enum) {
+        /// Format the struct as a dictionary (field names as keys, field values as values).
         dictionary: Dictionary,
+        /// Format the struct as a Record and a set of values (no field names).
         record: Record,
+        /// Format the struct as a sequence of field values.
         sequence,
     };
 
+    /// Format specification for an enum type.
     pub const Enum = struct {
+        /// The format of the enum's value.
         value: Simple = .symbol,
+        /// Whether or not to prefix the value with a type name ("EnumType.foo" instead of "foo")
         namespaced: bool = false,
     };
 
+    /// Use default settings.
     default,
+    /// We are formatting a sequence.
     sequence,
+    /// We are formatting a simple object like a string or primitive
     simple: Simple,
+    /// We are formatting a dictionary.
     dictionary: Dictionary,
+    /// We are formatting a set.
     set: Simple,
+    /// We are formatting a struct.
     @"struct": Struct,
+    /// We are formatting an enum.
     @"enum": Enum,
 };
 
@@ -1705,7 +1763,7 @@ const Zoo = struct {
 
     const Animal = struct {
         const syrup_format = WireFormat{
-            .format = .{ .dictionary = .{ .key = .symbol } },
+            .format = .{ .dictionary = .{ .keys = .symbol } },
             .fields = &[_]Format{
                 .{ .simple = .data },
                 .{ .simple = .string },
