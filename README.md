@@ -58,7 +58,7 @@ Zig Types that can be (de)serialized to Syrup
 - [x] comptime integers
 - [x] comptime float (as f64)
 - [x] optionals
-- [ ] enum literals
+- [x] enum literals
 - [x] arrays
 - [x] slices
 - [x] vectors
