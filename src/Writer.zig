@@ -403,7 +403,7 @@ pub fn write(self: *Writer, val: anytype, comptime options: Options) WritingErro
     return try writeInternal(self, val, options, false);
 }
 
-pub fn writeInternal(self: *Writer, val: anytype, comptime options: Options, comptime record_merge: bool) WritingError!void {
+fn writeInternal(self: *Writer, val: anytype, comptime options: Options, comptime record_merge: bool) WritingError!void {
     const T = @TypeOf(val);
     const val_info = @typeInfo(T);
     const type_name = @typeName(T);
