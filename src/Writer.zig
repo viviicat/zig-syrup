@@ -408,39 +408,39 @@ fn writeInternal(self: *Writer, val: anytype, comptime options: Options, comptim
     const val_info = @typeInfo(T);
     const type_name = @typeName(T);
 
-    try switch (T) {
-        bool => self.writeBool(val),
-        void => self.writeBool(false),
-        f32 => self.writeFloat(val),
-        f64 => self.writeDouble(val),
-        dynamic.Value => self.writeDynamicValue(&val),
-        dynamic.Record => self.writeDynamicRecord(&val),
+    switch (T) {
+        bool => try self.writeBool(val),
+        void => try self.writeBool(false),
+        f32 => try self.writeFloat(val),
+        f64 => try self.writeDouble(val),
+        dynamic.Value => try self.writeDynamicValue(&val),
+        dynamic.Record => try self.writeDynamicRecord(&val),
         else => switch (val_info) {
-            .int => self.writeInt(val),
+            .int => try self.writeInt(val),
             .comptime_float => {
                 if (@as(f64, @floatCast(val)) == val) {
-                    return self.writeDouble(@as(f64, val));
+                    return try self.writeDouble(@as(f64, val));
                 }
 
                 @compileError("comptime float cannot be converted to f64");
             },
-            .comptime_int => self.writeInt(val),
-            .null => self.writeBool(false),
+            .comptime_int => try self.writeInt(val),
+            .null => try self.writeBool(false),
             .optional => {
                 if (val) |payload| {
-                    return self.write(payload, options);
+                    return try self.write(payload, options);
                 } else {
-                    return self.write(null, options);
+                    return try self.write(null, options);
                 }
             },
-            .array => self.write(&val, options),
+            .array => try self.write(&val, options),
             .vector => |info| {
                 const array: [info.len]info.child = val;
-                return self.write(&array, options);
+                return try self.write(&array, options);
             },
             .@"struct" => |struct_info| {
                 if (std.meta.hasFn(T, s_syrupify)) {
-                    return val.syrupify(self);
+                    return try val.syrupify(self);
                 }
 
                 // Check if it's an instance of a HashMap, if so we can write it as a Dictionary.
@@ -476,7 +476,7 @@ fn writeInternal(self: *Writer, val: anytype, comptime options: Options, comptim
                                     try self.write(key, val_options);
                                 }
                             } else @compileError("Found what looks like a set (has a KV decl with a void value) but it doesn't have `keyIterator` or `keys` functions");
-                            return self.writeSetEnd();
+                            return try self.writeSetEnd();
                         },
                         else => {
                             const format: Format.Dictionary = switch (options.format) {
@@ -504,7 +504,7 @@ fn writeInternal(self: *Writer, val: anytype, comptime options: Options, comptim
                                     try self.write(val.kvs.values[i], value_options);
                                 }
                             } else @compileError("Found a dictionary-like struct (has a KV decl with key and value) but it doesn't have `iterator` or `keys` functions");
-                            return self.writeDictionaryEnd();
+                            return try self.writeDictionaryEnd();
                         },
                     }
                 }
@@ -596,16 +596,16 @@ fn writeInternal(self: *Writer, val: anytype, comptime options: Options, comptim
                 }
 
                 if (write_sequence) {
-                    return self.writeSequenceEnd();
+                    return try self.writeSequenceEnd();
                 } else if (format == null or format.? == .dictionary) {
-                    return self.writeDictionaryEnd();
+                    return try self.writeDictionaryEnd();
                 } else if (!record_merge) {
-                    return self.writeRecordEnd();
+                    return try self.writeRecordEnd();
                 }
             },
             .@"enum" => |enum_info| {
                 if (std.meta.hasFn(T, s_syrupify)) {
-                    return val.syrupify(self);
+                    return try val.syrupify(self);
                 }
 
                 if (!enum_info.is_exhaustive) {
@@ -615,7 +615,7 @@ fn writeInternal(self: *Writer, val: anytype, comptime options: Options, comptim
                             break;
                         }
                     } else {
-                        return self.write(@intFromEnum(val), .{});
+                        return try self.write(@intFromEnum(val), .{});
                     }
                 }
 
@@ -632,7 +632,7 @@ fn writeInternal(self: *Writer, val: anytype, comptime options: Options, comptim
 
                 const val_options = Options{ .format = .{ .simple = enum_format.value } };
 
-                return self.write(val_str, val_options);
+                return try self.write(val_str, val_options);
             },
             // TODO merge with above using inline ?
             .enum_literal => {
@@ -648,11 +648,11 @@ fn writeInternal(self: *Writer, val: anytype, comptime options: Options, comptim
 
                 const val_options = Options{ .format = enum_format.value };
 
-                return self.write(val_str, val_options);
+                return try self.write(val_str, val_options);
             },
             .@"union" => |info| {
                 if (std.meta.hasFn(T, s_syrupify)) {
-                    return val.syrupify(self);
+                    return try val.syrupify(self);
                 }
 
                 const syrup_format: ?Format = if (@hasDecl(T, s_syrup_format)) T.syrup_format else null;
@@ -661,7 +661,7 @@ fn writeInternal(self: *Writer, val: anytype, comptime options: Options, comptim
                 else if (syrup_format) |fmt| switch (fmt) {
                     .@"union" => |u_fmt| u_fmt,
                     else => @compileError("syrup_format must be union type in a union, was " ++ @tagName(syrup_format)),
-                } else .{ .dictionary = .symbol };
+                } else .{ .record_merge = .symbol };
 
                 if (info.tag_type) |UnionTagType| {
                     inline for (info.fields) |u_field| {
@@ -678,14 +678,16 @@ fn writeInternal(self: *Writer, val: anytype, comptime options: Options, comptim
                                 .record_merge,
                                 => |label_fmt| {
                                     if (!record_merge) {
-                                        try self.writeRecordStartLabeledOptions(u_field.name, .{ .format = label_fmt });
+                                        try self.writeRecordStartLabeledOptions(u_field.name, .{ .format = .{ .simple = label_fmt } });
                                     }
                                     try self.writeInternal(field_val, .{}, format == .record_merge);
                                     if (!record_merge) {
                                         try self.writeRecordEnd();
                                     }
                                 },
-                                .direct_value => try self.write(field_val, options),
+                                .direct_value => {
+                                    try self.write(field_val, options);
+                                },
                             }
                             break;
                         }
@@ -705,10 +707,10 @@ fn writeInternal(self: *Writer, val: anytype, comptime options: Options, comptim
                         .array => {
                             // Coerce `*[N]T` to `[]const T`.
                             const Slice = []const std.meta.Elem(ChildType);
-                            return self.write(@as(Slice, val), options);
+                            return try self.write(@as(Slice, val), options);
                         },
                         else => {
-                            return self.write(val.*, options);
+                            return try self.write(val.*, options);
                         },
                     };
                 },
@@ -719,11 +721,11 @@ fn writeInternal(self: *Writer, val: anytype, comptime options: Options, comptim
                     if (ptr_info.child == u8) {
                         if (options.format) |fmt| {
                             switch (fmt) {
-                                .simple => |simple| return self.writeBytes(slice, simple),
+                                .simple => |simple| return try self.writeBytes(slice, simple),
                                 .sequence => {},
                                 else => @compileError("cannot use " ++ options.format ++ " format for []u8"),
                             }
-                        } else return self.writeBytes(slice, .string);
+                        } else return try self.writeBytes(slice, .string);
                     }
 
                     switch (options.format orelse .sequence) {
@@ -732,14 +734,14 @@ fn writeInternal(self: *Writer, val: anytype, comptime options: Options, comptim
                             for (slice) |item| {
                                 try self.write(item, options);
                             }
-                            return self.writeSequenceEnd();
+                            return try self.writeSequenceEnd();
                         },
                         .set => |set| {
                             try self.writeSetStart();
                             for (slice) |item| {
                                 try self.write(item, .{ .format = .{ .simple = set } });
                             }
-                            return self.writeSetEnd();
+                            return try self.writeSetEnd();
                         },
                         else => @compileError(std.fmt.comptimePrint("unsupported format {s} for slice {s}. Dictionaries and sets cannot be safely serialized from slices due to non-uniqueness", .{ @tagName(options), @typeName(T) })),
                     }
@@ -748,7 +750,7 @@ fn writeInternal(self: *Writer, val: anytype, comptime options: Options, comptim
             },
             else => @compileError("unsupported type! " ++ @typeName(T)),
         },
-    };
+    }
 }
 
 /// Write a `dynamic.Value`.
@@ -2170,7 +2172,7 @@ test "test union .. why not test ourselves" {
             .@"struct" = .{ .record = .{ .label = .string, .name = "MyFunRecord" } },
         },
     });
-    try std.testing.expectEqualStrings("<\"MyFunRecord\" {`dictionary`: {`keys`: `symbol`, `values`: false}}, [{`simple`: `data`}, {`simple`: `string`}, false, false, false, {`set`: `data`}]>", output.written());
+    try std.testing.expectEqualStrings("<\"MyFunRecord\" <`dictionary` {`keys`: `symbol`, `values`: false}>, [<`simple` `data`>, <`simple` `string`>, false, false, false, <`set` `data`>]>", output.written());
 }
 
 // Roll your own ocapn (just a toy set of a couple ocapn models, nothing fancy)
@@ -2215,6 +2217,6 @@ test "roll your own ocapn" {
     var writer = Writer.initJSyrup(&output.writer, std.testing.allocator);
     defer output.deinit();
     defer writer.deinit();
-    try writer.write(Op.Deliver{ .to_desc = .{ .position = 5 }, .args = &[_]dynamic.Value{.{ .symbol = "make-car-factory" }}, .answer_pos = 3 }, .{});
-    try std.testing.expectEqualStrings("<`op:deliver` <`desc:export` 5>, [`make-car-factory`], 3, false>", output.written());
+    try writer.write(Op.Deliver{ .to_desc = .{ .position = 5 }, .args = &[_]dynamic.Value{.{ .symbol = "make-car-factory" }}, .answer_pos = 3, .@"resolve-me-desc" = .{ .promise = .{ .position = 45 } } }, .{});
+    try std.testing.expectEqualStrings("<`op:deliver` <`desc:export` 5>, [`make-car-factory`], 3, <`desc:import-promise` 45>>", output.written());
 }
