@@ -15,8 +15,6 @@ const dynamic = @import("dynamic.zig");
 const tags = @import("tags.zig");
 const CollectionMode = @import("collections.zig").CollectionMode;
 
-const print = std.debug.print;
-
 const Writer = @This();
 
 const UnderflowError = error{
@@ -392,12 +390,12 @@ inline fn curWriter(self: *Writer) *std.Io.Writer {
     return if (self.dict_or_set_depth > 0) &self.tmp_writer.writer else self.underlying_writer;
 }
 
-fn writeBytes(self: *Writer, val: []const u8, format: Format.Simple) FlatError!void {
-    switch (format) {
-        .string, .default => try self.writeString(val),
+fn writeBytes(self: *Writer, val: []const u8, format: ?Format.Simple) FlatError!void {
+    if (format) |fmt| switch (fmt) {
+        .string => try self.writeString(val),
         .data => try self.writeData(val),
         .symbol => try self.writeSymbol(val),
-    }
+    } else try self.writeString(val);
 }
 
 /// Write a supported type.
@@ -408,6 +406,7 @@ pub fn write(self: *Writer, val: anytype, comptime options: Options) WritingErro
 
     try switch (T) {
         bool => self.writeBool(val),
+        void => self.writeBool(false),
         f32 => self.writeFloat(val),
         f64 => self.writeDouble(val),
         dynamic.Value => self.writeDynamicValue(&val),
@@ -436,6 +435,10 @@ pub fn write(self: *Writer, val: anytype, comptime options: Options) WritingErro
                 return self.write(&array, options);
             },
             .@"struct" => |struct_info| {
+                if (std.meta.hasFn(T, s_syrupify)) {
+                    return val.syrupify(self);
+                }
+
                 // Check if it's an instance of a HashMap, if so we can write it as a Dictionary.
                 // If it has a KV declaration we assume it is. A little more fragile than I would like, but I think it's relatively okay.
                 const is_hash_map_like = @hasDecl(T, "KV");
@@ -444,18 +447,12 @@ pub fn write(self: *Writer, val: anytype, comptime options: Options) WritingErro
                     const V = @typeInfo(@field(T, "KV")).@"struct".fields[1].type;
                     switch (V) {
                         void => {
-                            if (options.format != .default and options.format != .set) {
-                                @compileError(type_name ++ " was detected to be a Set (seems to be HashMap with void V), but the layout specified for it was not `.set`.");
-                            }
-
-                            const val_options = Options{
-                                .simple = .{
-                                    .set = comptime if (options.format == .set)
-                                        options.format.set
-                                    else
-                                        .default,
-                                },
+                            const format: ?Format.Simple = switch (options.format) {
+                                null, .set => |fmt| fmt,
+                                else => @compileError(type_name ++ " was detected to be a Set (seems to be HashMap with void V), but the layout specified for it was not `.set`."),
                             };
+
+                            const val_options = Options{ .format = format };
 
                             try self.writeSetStart();
 
@@ -478,27 +475,14 @@ pub fn write(self: *Writer, val: anytype, comptime options: Options) WritingErro
                             return self.writeSetEnd();
                         },
                         else => {
-                            if (options.format != .default and options.format != .dictionary) {
-                                @compileError(type_name ++ " was detected to be a Dictionary (seems to be HashMap), but the layout specified for it was not `.dictionary`.");
-                            }
-
-                            const key_options = Options{
-                                .format = .{
-                                    .simple = if (options.format == .dictionary)
-                                        options.format.dictionary.keys
-                                    else
-                                        .default,
-                                },
+                            const format: Format.Dictionary = switch (options.format) {
+                                null => .{},
+                                .dictionary => |fmt| fmt,
+                                else => @compileError("Found what looks like a dictionary (has a KV decl with non-void value) but the format specified for it was not `.dictionary`."),
                             };
 
-                            const value_options = Options{
-                                .format = .{
-                                    .simple = if (options.format == .dictionary)
-                                        options.format.dictionary.values
-                                    else
-                                        .default,
-                                },
-                            };
+                            const key_options = Options{ .format = format.keys };
+                            const value_options = Options{ .format = format.values };
 
                             try self.writeDictionaryStart();
                             // Support both a standard HashMap that has an iterator, and the StaticStringMap which just has a kvs field
@@ -521,13 +505,13 @@ pub fn write(self: *Writer, val: anytype, comptime options: Options) WritingErro
                     }
                 }
 
-                const has_syrup_format = @hasDecl(T, syrup_format);
-                if (has_syrup_format and @TypeOf(T.syrup_format) != WireFormat) {
+                const wire_format: ?WireFormat = if (@hasDecl(T, s_syrup_format)) T.syrup_format else null;
+                if (@hasDecl(T, s_syrup_format) and @TypeOf(T.syrup_format) != WireFormat) {
                     @compileError("`syrup_format` declaration found in struct " ++ type_name ++ ", but it is type " ++ @typeName(T.syrup_format) ++ ". Must be " ++ @typeInfo(WireFormat) ++ ".");
                 }
 
-                if (has_syrup_format) {
-                    if (T.syrup_format.fields) |field_formats| {
+                if (wire_format) |wire_fmt| {
+                    if (wire_fmt.fields) |field_formats| {
                         // Verify field layout count matches field count
                         if (field_formats.len != struct_info.fields.len) {
                             @compileError(std.fmt.comptimePrint(
@@ -538,42 +522,54 @@ pub fn write(self: *Writer, val: anytype, comptime options: Options) WritingErro
                     }
                 }
 
+                const format: ?Format.Struct = if (options.format) |fmt|
+                    switch (fmt) {
+                        .@"struct" => |st| st,
+                        else => @compileError("write options specified non-struct format for struct " ++ type_name),
+                    }
+                else if (wire_format) |wire_fmt|
+                    wire_fmt.format
+                else
+                    null;
+
                 // Tuples default to a sequence.
-                const write_sequence = (!has_syrup_format and struct_info.is_tuple) or
-                    (has_syrup_format and T.syrup_format.format == .sequence);
+                const write_sequence = (format == null and struct_info.is_tuple) or
+                    (format != null and format.? == .sequence);
                 if (write_sequence) {
                     try self.writeSequenceStart();
-                } else if (!has_syrup_format or T.syrup_format.format == .dictionary) {
+                } else if (format == null or format.? == .dictionary) {
                     // Other structs default to a dictionary.
                     try self.writeDictionaryStart();
-                } else if (T.syrup_format.format == .record) {
+                } else if (format != null and format.? == .record) {
                     const record_label_format: Format = .{
-                        .simple = if (has_syrup_format)
-                            T.syrup_format.format.record.label
+                        .simple = if (format) |fmt|
+                            fmt.record.label
                         else
                             .default,
                     };
 
-                    const rec_type_name = if (has_syrup_format)
-                        T.syrup_format.format.record.name orelse type_name
+                    const rec_type_name = if (format) |fmt|
+                        fmt.record.name orelse type_name
                     else
                         type_name;
 
-                    try self.writeRecordStartLabeledOptions(rec_type_name, .{ .format = record_label_format });
+                    if (!options.record_only_fields) {
+                        try self.writeRecordStartLabeledOptions(rec_type_name, .{ .format = record_label_format });
+                    }
                 }
 
                 comptime var i = 0;
                 inline for (struct_info.fields) |Field| {
                     if (!write_sequence and
-                        (!has_syrup_format or T.syrup_format.format == .dictionary))
+                        (format == null or format.? == .dictionary))
                     {
                         // Default to symbols as dictionary keys
                         try self.write(
                             Field.name,
                             .{
                                 .format = .{
-                                    .simple = if (has_syrup_format)
-                                        T.syrup_format.format.dictionary.keys
+                                    .simple = if (format) |fmt|
+                                        fmt.dictionary.keys
                                     else
                                         .symbol,
                                 },
@@ -581,15 +577,15 @@ pub fn write(self: *Writer, val: anytype, comptime options: Options) WritingErro
                         );
                     }
 
-                    const field_format: Format = if (has_syrup_format)
-                        if (T.syrup_format.fields) |field_formats|
+                    const field_format: ?Format = if (wire_format) |wire_fmt|
+                        if (wire_fmt.fields) |field_formats|
                             field_formats[i]
-                        else if (T.syrup_format.format == .dictionary)
-                            T.syrup_format.format.dictionary.values
+                        else if (wire_fmt.format == .dictionary)
+                            wire_fmt.dictionary.values
                         else
-                            .default
+                            null
                     else
-                        .default;
+                        null;
 
                     try self.write(@field(val, Field.name), .{ .format = field_format });
                     i += 1;
@@ -597,13 +593,17 @@ pub fn write(self: *Writer, val: anytype, comptime options: Options) WritingErro
 
                 if (write_sequence) {
                     return self.writeSequenceEnd();
-                } else if (!has_syrup_format or T.syrup_format.format == .dictionary) {
+                } else if (format == null or format.? == .dictionary) {
                     return self.writeDictionaryEnd();
-                } else {
+                } else if (!options.record_only_fields) {
                     return self.writeRecordEnd();
                 }
             },
             .@"enum" => |enum_info| {
+                if (std.meta.hasFn(T, s_syrupify)) {
+                    return val.syrupify(self);
+                }
+
                 if (!enum_info.is_exhaustive) {
                     // Check if the value is part of the enum (print the value directly if not).
                     inline for (enum_info.fields) |field| {
@@ -615,45 +615,83 @@ pub fn write(self: *Writer, val: anytype, comptime options: Options) WritingErro
                     }
                 }
 
+                const enum_format: Format.Enum = if (options.format) |wire_fmt| switch (wire_fmt) {
+                    .@"enum" => |fmt| fmt,
+                    else => |fmt| @compileError("Enum's format should be either null, or the enum field, was " ++ @tagName(fmt)),
+                } else .{};
+
                 var name_buf: [128]u8 = undefined;
-                const val_str = if (options.format == .@"enum")
-                    if (options.format.@"enum".namespaced)
-                        try std.fmt.bufPrint(&name_buf, "{s}.{s}", .{ type_name, @tagName(val) })
-                    else
-                        @tagName(val)
+                const val_str = if (enum_format.namespaced)
+                    try std.fmt.bufPrint(&name_buf, "{s}.{s}", .{ type_name, @tagName(val) })
                 else
                     @tagName(val);
 
-                const val_options = Options{
-                    .format = .{
-                        .simple = if (options.format == .@"enum")
-                            options.format.@"enum".value
-                        else
-                            .symbol,
-                    },
-                };
+                const val_options = Options{ .format = .{ .simple = enum_format.value } };
 
                 return self.write(val_str, val_options);
             },
+            // TODO merge with above using inline ?
             .enum_literal => {
-                const val_str = if (options.format == .@"enum")
-                    if (options.format.@"enum".namespaced)
-                        type_name ++ "." ++ @tagName(val)
-                    else
-                        @tagName(val)
-                else
-                    @tagName(val);
-
-                const val_options = Options{
-                    .format = .{
-                        .simple = if (options.format == .@"enum")
-                            options.format.@"enum".value
-                        else
-                            .symbol,
-                    },
+                const enum_format: Format.Enum = switch (options.format) {
+                    null => .{},
+                    .@"enum" => |fmt| fmt,
+                    else => |fmt| @compileError("Enum's format should be either null, or the enum field, was " ++ @tagName(fmt)),
                 };
+                const val_str = if (enum_format.namespaced) {
+                    var name_buf: [128]u8 = undefined;
+                    return try std.fmt.bufPrint(&name_buf, "{s}.{s}", .{ type_name, @tagName(val) });
+                } else @tagName(val);
+
+                const val_options = Options{ .format = enum_format.value };
 
                 return self.write(val_str, val_options);
+            },
+            .@"union" => |info| {
+                if (std.meta.hasFn(T, s_syrupify)) {
+                    return val.syrupify(self);
+                }
+
+                const wire_format: ?Format = if (@hasDecl(T, s_syrup_format)) T.syrup_format else null;
+                const format: Format.Union = if (options.format) |fmt|
+                    fmt
+                else if (wire_format) |fmt| switch (fmt) {
+                    .@"union" => |u_fmt| u_fmt,
+                    else => @compileError("syrup_format must be union type in a union, was " ++ @tagName(wire_format)),
+                } else .{ .dictionary = .symbol };
+
+                if (info.tag_type) |UnionTagType| {
+                    inline for (info.fields) |u_field| {
+                        if (val == @field(UnionTagType, u_field.name)) {
+                            const field_val = @field(val, u_field.name);
+                            switch (format) {
+                                .dictionary => |key_fmt| {
+                                    try self.writeDictionaryStart();
+                                    try self.write(u_field.name, .{ .format = .{ .simple = key_fmt } });
+                                    try self.write(field_val, .{});
+                                    try self.writeDictionaryEnd();
+                                },
+                                .record,
+                                .record_merge,
+                                => |label_fmt| {
+                                    if (!options.record_only_fields) {
+                                        try self.writeRecordStartLabeledOptions(u_field.name, .{ .format = label_fmt });
+                                    }
+                                    try self.write(field_val, .{ .record_only_fields = format == .record_merge });
+                                    if (!options.record_only_fields) {
+                                        try self.writeRecordEnd();
+                                    }
+                                },
+                                .direct_value => try self.write(field_val, options),
+                            }
+                            break;
+                        }
+                    } else {
+                        unreachable; // No active tag?
+                    }
+                    return;
+                } else {
+                    @compileError("Unable to serialize untagged union '" ++ @typeName(T) ++ "'");
+                }
             },
             .pointer => |ptr_info| switch (ptr_info.size) {
                 .one => {
@@ -674,26 +712,28 @@ pub fn write(self: *Writer, val: anytype, comptime options: Options) WritingErro
                     if (ptr_info.size == .many and ptr_info.sentinel() == null)
                         @compileError("unable to serialize type '" ++ @typeName(T) ++ "' without sentinel");
                     const slice = if (ptr_info.size == .many) std.mem.span(val) else val;
-                    if (ptr_info.child == u8 and options.format != .sequence) {
-                        switch (options.format) {
-                            .default => return self.writeBytes(slice, .string),
-                            .simple => |simple| return self.writeBytes(slice, simple),
-                            else => @compileError("cannot use " ++ options.format ++ " format for []u8"),
-                        }
+                    if (ptr_info.child == u8) {
+                        if (options.format) |fmt| {
+                            switch (fmt) {
+                                .simple => |simple| return self.writeBytes(slice, simple),
+                                .sequence => {},
+                                else => @compileError("cannot use " ++ options.format ++ " format for []u8"),
+                            }
+                        } else return self.writeBytes(slice, .string);
                     }
 
-                    switch (options.format) {
-                        .sequence, .default => {
+                    switch (options.format orelse .sequence) {
+                        .sequence => {
                             try self.writeSequenceStart();
                             for (slice) |item| {
                                 try self.write(item, options);
                             }
                             return self.writeSequenceEnd();
                         },
-                        .set => {
+                        .set => |set| {
                             try self.writeSetStart();
                             for (slice) |item| {
-                                try self.write(item, .{ .format = .{ .simple = options.format.set } });
+                                try self.write(item, .{ .format = .{ .simple = set } });
                             }
                             return self.writeSetEnd();
                         },
@@ -851,7 +891,7 @@ fn writeRecordStartLabeledOptions(self: *Writer, label: anytype, comptime option
     try self.nested_datas.append(self.gpa, .{ .record = 0 });
     try self.write(
         label,
-        if (options.format == .default)
+        if (options.format == null)
             .{ .format = .{ .simple = .symbol } }
         else
             options,
@@ -1130,12 +1170,17 @@ fn maybeFlushBuffer(self: *Writer) FormatterError!void {
     }
 }
 
-const syrup_format = "syrup_format";
+const s_syrup_format = "syrup_format";
+const s_syrupify = "syrupify";
 
 /// Options for `write`.
 pub const Options = struct {
     /// The `Format` to use for the structure.
-    format: Format = .default,
+    format: ?Format = null,
+    /// If true, and the value is to be a record, don't write the record or its label at all, just write the entries
+    /// sequentially. For use when serializing a record in a union.
+    /// This probably shouldn't be exposed publicly.
+    record_only_fields: bool = false,
 };
 
 /// Custom wire format of a struct and its fields.
@@ -1144,7 +1189,7 @@ pub const WireFormat = struct {
     /// The `Format.Struct` to use for this struct.
     format: Format.Struct = .{ .dictionary = .{} },
     /// The list of `Format` settings for each field, in order. Count must match the field count.
-    fields: ?[]const Format = null,
+    fields: ?[]const ?Format = null,
 };
 
 /// Custom format specification for a type.
@@ -1158,8 +1203,6 @@ pub const WireFormat = struct {
 pub const Format = union(enum) {
     /// Format specification for strings and primitives.
     pub const Simple = enum {
-        /// Perform the default behavior.
-        default,
         /// Write as a string.
         string,
         /// Write as a symbol.
@@ -1171,15 +1214,15 @@ pub const Format = union(enum) {
     /// Format specification for a dictionary type.
     pub const Dictionary = struct {
         /// The format of the dictionary keys.
-        keys: Simple = .default,
+        keys: ?Simple = null,
         /// The format of the dictionary values.
-        values: Simple = .default,
+        values: ?Simple = null,
     };
 
     /// Format specification for a record type.
     pub const Record = struct {
         /// The format of the record's label.
-        label: Simple = .symbol,
+        label: ?Simple = null,
         /// Custom name for the record (will appear as the label).
         name: ?[]const u8 = null,
     };
@@ -1202,20 +1245,46 @@ pub const Format = union(enum) {
         namespaced: bool = false,
     };
 
-    /// Use default settings.
-    default,
+    /// Format specification for a union type.
+    pub const Union = union(enum) {
+        /// Format as a single-item Dictionary with the key being the union's active field name
+        /// and the value being the child value.
+        dictionary: Simple,
+        /// Format as a single-item Record with the label being the union's active field name
+        /// with specified `Simple` type of string and the record's only entry being the child value.
+        /// Children that are Records become a full record inside this parent record. This could be
+        /// undesirable in some cases--use `Union.record_merge` for such cases.
+        /// Examples:
+        /// - <string "this is a string">
+        /// - <inner_record <Namespace.InnerRecord "inner_record" "is a" "record with 3 string fields">>
+        record: Simple,
+        /// Same as `Union.record` for all child types *except* record. Child records are 'merged' into the
+        /// parent (union)'s record, i.e., their fields are written directly into the union record instead
+        /// of an inner record. The record's label is the active union field name.
+        /// Examples:
+        /// - <string "this is a string">
+        /// - <inner_record "inner_record" "is a" "record with 3 string fields">
+        record_merge: Simple,
+        /// Format as the value directly, without the field name of the union included.
+        /// this is useful for unions where each field is a unique type and the types are Records,
+        /// or if you don't need to know the active field type and want to avoid nesting.
+        direct_value,
+    };
+
     /// We are formatting a sequence.
     sequence,
     /// We are formatting a simple object like a string or primitive
-    simple: Simple,
+    simple: ?Simple,
     /// We are formatting a dictionary.
     dictionary: Dictionary,
     /// We are formatting a set.
-    set: Simple,
+    set: ?Simple,
     /// We are formatting a struct.
     @"struct": Struct,
     /// We are formatting an enum.
     @"enum": Enum,
+    /// We are formatting a union.
+    @"union": Union,
 };
 
 /// While not strictly necessary, this function can be used to assert that all nested structures have been
@@ -1696,14 +1765,14 @@ const MyStruct = struct {
 
     const syrup_format = WireFormat{
         .format = .{ .record = .{ .label = .string } },
-        .fields = &[_]Format{
+        .fields = &[_]?Format{
             .{ .simple = .string },
             .{ .simple = .symbol },
-            .default,
-            .default,
+            null,
+            null,
             .{ .simple = .data },
             .sequence,
-            .default,
+            null,
         },
     };
 
@@ -1764,12 +1833,12 @@ const Zoo = struct {
     const Animal = struct {
         const syrup_format = WireFormat{
             .format = .{ .dictionary = .{ .keys = .symbol } },
-            .fields = &[_]Format{
+            .fields = &[_]?Format{
                 .{ .simple = .data },
                 .{ .simple = .string },
-                .default,
-                .default,
-                .default,
+                null,
+                null,
+                null,
                 .{ .set = .data },
             },
         };
@@ -2023,4 +2092,51 @@ test "enum literal" {
 
     try writer.write(.{ .@"`title`" = "How to run", .text = "\tRun the \"Copy\" command.\n" }, .{});
     try std.testing.expectEqualStrings("{`\\`title\\``: \"How to run\", `text`: \"\\tRun the \\\"Copy\\\" command.\\n\"}", output.written());
+}
+
+const SpecialDate = struct {
+    pub fn syrupify(self: SpecialDate, writer: *Writer) !void {
+        var buf: [64]u8 = undefined;
+        try writer.writeString(try std.fmt.bufPrint(&buf, "{}:{}:{}", .{ self.hours, self.minutes, self.seconds }));
+    }
+
+    hours: usize,
+    minutes: usize,
+    seconds: usize,
+};
+
+test "struct with syrupify" {
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    var writer = Writer.init(&output.writer, std.testing.allocator);
+    defer output.deinit();
+    defer writer.deinit();
+    try writer.write(SpecialDate{
+        .hours = 23,
+        .minutes = 35,
+        .seconds = 59,
+    }, .{});
+    try std.testing.expectEqualStrings("8\"23:35:59", output.written());
+}
+
+test "test union .. why not test ourselves" {
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    var writer = Writer.initJSyrup(&output.writer, std.testing.allocator);
+    defer output.deinit();
+    defer writer.deinit();
+    try writer.write(WireFormat{
+        .format = .{ .dictionary = .{ .keys = .symbol } },
+        .fields = &[_]?Format{
+            .{ .simple = .data },
+            .{ .simple = .string },
+            null,
+            null,
+            null,
+            .{ .set = .data },
+        },
+    }, .{
+        .format = .{
+            .@"struct" = .{ .record = .{ .label = .string, .name = "MyFunRecord" } },
+        },
+    });
+    try std.testing.expectEqualStrings("<\"MyFunRecord\" {`dictionary`: {`keys`: `symbol`, `values`: false}}, [{`simple`: `data`}, {`simple`: `string`}, false, false, false, {`set`: `data`}]>", output.written());
 }

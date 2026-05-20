@@ -69,7 +69,6 @@ Zig Types that can be (de)serialized to Syrup
   - [x] as Dictionary (key is the field name)
 - [ ] unions
 - [x] tuples
-- [ ] error sets
 - [x] general pointers
 - [x] `dynamic.Value`
 
@@ -106,7 +105,7 @@ There is a benchmarking tool available at [zig-syrup-benchmark](https://codeberg
 - [ ] **Fuzz testing** - Zig has fuzz testing support in the standard library we could play with.
 - [x] **`jsyrup` support** - human readable syrup format
   - [ ] Indented `jsyrup`
-- [ ] **syrupify** - Add support for user function to transform zig struct
+- [x] **syrupify** - Add support for user function to transform zig struct
 - [x] **[`libsyrup`](https://codeberg.org/vivicat/libsyrup)** - a C API for the low level syrup serialization
 - [ ] **CLI tool** - to quickly pretty-print syrup structure and convert to jsyrup, unsure if converting ZON to syrup is useful here without type information, maybe it's possible/useful.
 
