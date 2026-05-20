@@ -67,7 +67,7 @@ Zig Types that can be (de)serialized to Syrup
   - [x] as Record (label is the type name)
   - [x] as Sequence (just the field values)
   - [x] as Dictionary (key is the field name)
-- [ ] unions
+- [x] unions
 - [x] tuples
 - [x] general pointers
 - [x] `dynamic.Value`
