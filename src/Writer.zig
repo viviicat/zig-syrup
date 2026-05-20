@@ -549,7 +549,7 @@ fn writeInternal(self: *Writer, val: anytype, comptime options: Options, comptim
                         .simple = if (format) |fmt|
                             fmt.record.label
                         else
-                            .default,
+                            .symbol,
                     };
 
                     const rec_type_name = if (format) |fmt|
@@ -895,7 +895,8 @@ fn writeRecordStartLabeledOptions(self: *Writer, label: anytype, comptime option
     try self.nested_datas.append(self.gpa, .{ .record = 0 });
     try self.write(
         label,
-        if (options.format == null)
+        if (options.format == null or
+            (options.format.? == .simple and options.format.?.simple == null))
             .{ .format = .{ .simple = .symbol } }
         else
             options,
@@ -2170,4 +2171,50 @@ test "test union .. why not test ourselves" {
         },
     });
     try std.testing.expectEqualStrings("<\"MyFunRecord\" {`dictionary`: {`keys`: `symbol`, `values`: false}}, [{`simple`: `data`}, {`simple`: `string`}, false, false, false, {`set`: `data`}]>", output.written());
+}
+
+// Roll your own ocapn (just a toy set of a couple ocapn models, nothing fancy)
+
+const Desc = struct {
+    fn PosObject(name: []const u8) type {
+        return struct {
+            const syrup_format = SyrupFormat{
+                .format = .{ .record = .{ .name = name } },
+            };
+
+            position: u64,
+        };
+    }
+
+    const ImportObject = PosObject("desc:import-object");
+    const ImportPromise = PosObject("desc:import-promise");
+    const Export = PosObject("desc:export");
+    const Answer = PosObject("desc:answer");
+
+    const ImportObjectOrPromise = union(enum) {
+        object: ImportObject,
+        promise: ImportPromise,
+    };
+};
+
+const Op = struct {
+    const Deliver = struct {
+        const syrup_format = SyrupFormat{
+            .format = .{ .record = .{ .name = "op:deliver" } },
+        };
+
+        to_desc: Desc.Export,
+        args: []const dynamic.Value,
+        answer_pos: ?u64 = null,
+        @"resolve-me-desc": ?Desc.ImportObjectOrPromise = null,
+    };
+};
+
+test "roll your own ocapn" {
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    var writer = Writer.initJSyrup(&output.writer, std.testing.allocator);
+    defer output.deinit();
+    defer writer.deinit();
+    try writer.write(Op.Deliver{ .to_desc = .{ .position = 5 }, .args = &[_]dynamic.Value{.{ .symbol = "make-car-factory" }}, .answer_pos = 3 }, .{});
+    try std.testing.expectEqualStrings("<`op:deliver` <`desc:export` 5>, [`make-car-factory`], 3, false>", output.written());
 }
