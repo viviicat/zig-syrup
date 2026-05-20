@@ -400,6 +400,10 @@ fn writeBytes(self: *Writer, val: []const u8, format: ?Format.Simple) FlatError!
 
 /// Write a supported type.
 pub fn write(self: *Writer, val: anytype, comptime options: Options) WritingError!void {
+    return try writeInternal(self, val, options, false);
+}
+
+pub fn writeInternal(self: *Writer, val: anytype, comptime options: Options, comptime record_merge: bool) WritingError!void {
     const T = @TypeOf(val);
     const val_info = @typeInfo(T);
     const type_name = @typeName(T);
@@ -553,7 +557,7 @@ pub fn write(self: *Writer, val: anytype, comptime options: Options) WritingErro
                     else
                         type_name;
 
-                    if (!options.record_only_fields) {
+                    if (!record_merge) {
                         try self.writeRecordStartLabeledOptions(rec_type_name, .{ .format = record_label_format });
                     }
                 }
@@ -595,7 +599,7 @@ pub fn write(self: *Writer, val: anytype, comptime options: Options) WritingErro
                     return self.writeSequenceEnd();
                 } else if (format == null or format.? == .dictionary) {
                     return self.writeDictionaryEnd();
-                } else if (!options.record_only_fields) {
+                } else if (!record_merge) {
                     return self.writeRecordEnd();
                 }
             },
@@ -673,11 +677,11 @@ pub fn write(self: *Writer, val: anytype, comptime options: Options) WritingErro
                                 .record,
                                 .record_merge,
                                 => |label_fmt| {
-                                    if (!options.record_only_fields) {
+                                    if (!record_merge) {
                                         try self.writeRecordStartLabeledOptions(u_field.name, .{ .format = label_fmt });
                                     }
-                                    try self.write(field_val, .{ .record_only_fields = format == .record_merge });
-                                    if (!options.record_only_fields) {
+                                    try self.writeInternal(field_val, .{}, format == .record_merge);
+                                    if (!record_merge) {
                                         try self.writeRecordEnd();
                                     }
                                 },
@@ -1177,10 +1181,6 @@ const s_syrupify = "syrupify";
 pub const Options = struct {
     /// The `Format` to use for the structure.
     format: ?Format = null,
-    /// If true, and the value is to be a record, don't write the record or its label at all, just write the entries
-    /// sequentially. For use when serializing a record in a union.
-    /// This probably shouldn't be exposed publicly.
-    record_only_fields: bool = false,
 };
 
 /// Custom wire format of a struct and its fields.
