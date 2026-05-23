@@ -564,9 +564,18 @@ pub fn write(self: *Writer, val: anytype, comptime options: Options) WritingErro
 
                 // Tuples default to a sequence.
                 const write_sequence = (format == null and struct_info.is_tuple) or
-                    (format != null and format.? == .sequence);
+                    (format != null and (format.? == .sequence or format.? == .labeled_sequence));
                 if (write_sequence) {
                     try self.writeSequenceStart();
+                    if (format) |fmt| {
+                        if (fmt == .labeled_sequence) {
+                            const seq_label_format: Format = .{ .simple = fmt.labeled_sequence.label };
+                            const seq_type_name = fmt.labeled_sequence.name orelse type_name;
+                            try self.write(seq_type_name, .{
+                                .format = seq_label_format,
+                            });
+                        }
+                    }
                 } else if (format == null or format.? == .dictionary) {
                     // Other structs default to a dictionary.
                     try self.writeDictionaryStart();
@@ -583,7 +592,9 @@ pub fn write(self: *Writer, val: anytype, comptime options: Options) WritingErro
                     else
                         type_name;
 
-                    try self.writeRecordStartLabeledOptions(rec_type_name, .{ .format = record_label_format });
+                    try self.writeRecordStartLabeledOptions(rec_type_name, .{
+                        .format = record_label_format,
+                    });
                 }
 
                 comptime var i = 0;
@@ -1281,6 +1292,8 @@ pub const Format = union(enum) {
         record: Record,
         /// Format the struct as a sequence of field values.
         sequence,
+        /// Format the struct as a sequence starting with a label and followed by the field values.
+        labeled_sequence: Record,
     };
 
     /// Format specification for an enum type.
@@ -2354,4 +2367,25 @@ test "union with custom formatted field" {
         .{ .c = "general" },
     }, .{});
     try std.testing.expectEqualStrings("[{`a`: \"hello\"}, {`b`: `there`}, {`c`: |m5sw4zlsmfwa|}]", output.written());
+}
+
+const SequenceStruct = struct {
+    party_time: bool,
+    num_friends: u64,
+};
+
+test "struct with labeled sequence" {
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    var writer = Writer.init(&output.writer, std.testing.allocator);
+    defer output.deinit();
+    defer writer.deinit();
+    try writer.write(
+        SequenceStruct{ .party_time = true, .num_friends = 45 },
+        .{
+            .format = .{
+                .@"struct" = .{ .labeled_sequence = .{ .name = "fun-sequence", .label = .symbol } },
+            },
+        },
+    );
+    try std.testing.expectEqualStrings("[12'fun-sequencet45+]", output.written());
 }
