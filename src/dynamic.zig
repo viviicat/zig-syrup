@@ -13,7 +13,8 @@ const Integral = union(enum) {
     i128: i128,
 };
 
-/// A union which allows for encoding the nested Syrup structure. Contains all the possible Syrup types.
+/// A union which allows for encoding the nested Syrup structure *dynamically*. Contains all the possible Syrup types.
+///
 /// Once created, it can be written via `Writer.write` or `Writer.writeValue`. For example:
 /// ```zig
 /// const set = Value{
@@ -34,6 +35,8 @@ const Integral = union(enum) {
 ///     },
 /// };
 /// ```
+///
+/// Note: If you want to quickly write a structure defined at *comptime*, you can instead pass an anonymous struct to `Writer.write` directly.
 pub const Value = union(enum) {
     true,
     false,
