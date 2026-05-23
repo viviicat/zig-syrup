@@ -7,6 +7,14 @@
 //! - You can also write primitives with the primitive methods like `writeString`, `writeBool`, etc (or just `write`).
 //! - Use `dynamic.Value` to build structures at runtime to write with `writeDynamicValue` and friends (or just `write`).
 //! - Build up Syrup structures manually using the structural writing methods like `writeDictionaryStart` and `writeSequenceStart`.
+//!
+//! Zig structs and unions can be customized to display in various ways. They can take the
+//! form of a syrup Dictionary (the default), Record, or Sequence. Records have additional
+//! ways of being represented. See `spec` for info on how to customize a struct or union.
+//! You can also specify a `Format` in the options of `write` for one-off customizations.
+//!
+//! Finally, if you want *full control* of how a struct, enum or union is turned into
+//! syrup format, define a public member named `syrupify` with `Writer` as the argument.
 
 const std = @import("std");
 
@@ -398,12 +406,32 @@ fn writeBytes(self: *Writer, val: []const u8, format: ?Format.Simple) FlatError!
     } else try self.writeString(val);
 }
 
-/// Write a supported type.
-pub fn write(self: *Writer, val: anytype, comptime options: Options) WritingError!void {
-    return try writeInternal(self, val, options, false);
+// Used to check if a child field will be serialized as a record, as it affects the logic in some scenarios.
+// This won't work if the record is serialized manually, for example in the `syrupify` function.
+fn isRecord(comptime T: type) bool {
+    const res = switch (@typeInfo(T)) {
+        .@"struct" => {
+            const syrup_spec: ?spec.Struct = if (@hasDecl(T, s_syrup_spec)) T.syrup_spec else null;
+            return if (syrup_spec) |s_spec|
+                s_spec.format == .record
+            else
+                false;
+        },
+        .@"union" => {
+            const syrup_spec: ?spec.Union = if (@hasDecl(T, s_syrup_spec)) T.syrup_spec else null;
+            return if (syrup_spec) |s_spec|
+                s_spec.format == .record
+            else
+                false;
+        },
+        else => false,
+    };
+
+    return res;
 }
 
-fn writeInternal(self: *Writer, val: anytype, comptime options: Options, comptime record_merge: bool) WritingError!void {
+/// Write a supported type.
+pub fn write(self: *Writer, val: anytype, comptime options: Options) WritingError!void {
     const T = @TypeOf(val);
     const val_info = @typeInfo(T);
     const type_name = @typeName(T);
@@ -443,18 +471,22 @@ fn writeInternal(self: *Writer, val: anytype, comptime options: Options, comptim
                     return try val.syrupify(self);
                 }
 
+                const syrup_spec: ?spec.Struct = if (@hasDecl(T, s_syrup_spec)) T.syrup_spec else null;
+
                 // Check if it's an instance of a HashMap, if so we can write it as a Dictionary.
                 // If it has a KV declaration we assume it is. A little more fragile than I would like, but I think it's relatively okay.
                 const is_hash_map_like = @hasDecl(T, "KV");
-
-                if (is_hash_map_like) {
+                if (syrup_spec == null and is_hash_map_like) {
                     const V = @typeInfo(@field(T, "KV")).@"struct".fields[1].type;
                     switch (V) {
                         void => {
-                            const format: ?Format.Simple = switch (options.format) {
-                                null, .set => |fmt| fmt,
-                                else => @compileError(type_name ++ " was detected to be a Set (seems to be HashMap with void V), but the layout specified for it was not `.set`."),
-                            };
+                            const format: ?Format.Simple = if (options.format) |fmt|
+                                switch (fmt) {
+                                    .set => |s_fmt| s_fmt,
+                                    else => @compileError(type_name ++ " was detected to be a Set (seems to be HashMap with void V), but the layout specified for it was not `.set`."),
+                                }
+                            else
+                                null;
 
                             const val_options = Options{ .format = format };
 
@@ -479,11 +511,10 @@ fn writeInternal(self: *Writer, val: anytype, comptime options: Options, comptim
                             return try self.writeSetEnd();
                         },
                         else => {
-                            const format: Format.Dictionary = switch (options.format) {
-                                null => .{},
-                                .dictionary => |fmt| fmt,
+                            const format: Format.Dictionary = if (options.format) |fmt| switch (fmt) {
+                                .dictionary => |d_fmt| d_fmt,
                                 else => @compileError("Found what looks like a dictionary (has a KV decl with non-void value) but the format specified for it was not `.dictionary`."),
-                            };
+                            } else .{};
 
                             const key_options = Options{ .format = format.keys };
                             const value_options = Options{ .format = format.values };
@@ -509,17 +540,12 @@ fn writeInternal(self: *Writer, val: anytype, comptime options: Options, comptim
                     }
                 }
 
-                const syrup_format: ?SyrupFormat = if (@hasDecl(T, s_syrup_format)) T.syrup_format else null;
-                if (@hasDecl(T, s_syrup_format) and @TypeOf(T.syrup_format) != SyrupFormat) {
-                    @compileError("`syrup_format` declaration found in struct " ++ type_name ++ ", but it is type " ++ @typeName(T.syrup_format) ++ ". Must be " ++ @typeInfo(SyrupFormat) ++ ".");
-                }
-
-                if (syrup_format) |syrup_fmt| {
-                    if (syrup_fmt.fields) |field_formats| {
+                if (syrup_spec) |s_spec| {
+                    if (s_spec.fields) |field_formats| {
                         // Verify field layout count matches field count
                         if (field_formats.len != struct_info.fields.len) {
                             @compileError(std.fmt.comptimePrint(
-                                "found `syrup_format` declaration in {s}, but length of field format list ({}) doesn't match the number of fields ({}).",
+                                "found `syrup_spec` declaration in {s}, but length of field format list ({}) doesn't match the number of fields ({}).",
                                 .{ type_name, field_formats.len, struct_info.fields.len },
                             ));
                         }
@@ -531,8 +557,8 @@ fn writeInternal(self: *Writer, val: anytype, comptime options: Options, comptim
                         .@"struct" => |st| st,
                         else => @compileError("write options specified non-struct format for struct " ++ type_name),
                     }
-                else if (syrup_format) |syrup_fmt|
-                    syrup_fmt.format
+                else if (syrup_spec) |s_spec|
+                    s_spec.format
                 else
                     null;
 
@@ -557,9 +583,7 @@ fn writeInternal(self: *Writer, val: anytype, comptime options: Options, comptim
                     else
                         type_name;
 
-                    if (!record_merge) {
-                        try self.writeRecordStartLabeledOptions(rec_type_name, .{ .format = record_label_format });
-                    }
+                    try self.writeRecordStartLabeledOptions(rec_type_name, .{ .format = record_label_format });
                 }
 
                 comptime var i = 0;
@@ -581,11 +605,11 @@ fn writeInternal(self: *Writer, val: anytype, comptime options: Options, comptim
                         );
                     }
 
-                    const field_format: ?Format = if (syrup_format) |syrup_fmt|
-                        if (syrup_fmt.fields) |field_formats|
+                    const field_format: ?Format = if (syrup_spec) |s_spec|
+                        if (s_spec.fields) |field_formats|
                             field_formats[i]
-                        else if (syrup_fmt.format == .dictionary)
-                            syrup_fmt.dictionary.values
+                        else if (s_spec.format == .dictionary)
+                            s_spec.dictionary.values
                         else
                             null
                     else
@@ -599,9 +623,8 @@ fn writeInternal(self: *Writer, val: anytype, comptime options: Options, comptim
                     return try self.writeSequenceEnd();
                 } else if (format == null or format.? == .dictionary) {
                     return try self.writeDictionaryEnd();
-                } else if (!record_merge) {
-                    return try self.writeRecordEnd();
                 }
+                return try self.writeRecordEnd();
             },
             .@"enum" => |enum_info| {
                 if (std.meta.hasFn(T, s_syrupify)) {
@@ -636,10 +659,9 @@ fn writeInternal(self: *Writer, val: anytype, comptime options: Options, comptim
             },
             // TODO merge with above using inline ?
             .enum_literal => {
-                const enum_format: Format.Enum = switch (options.format) {
-                    null => .{},
-                    .@"enum" => |fmt| fmt,
-                    else => |fmt| @compileError("Enum's format should be either null, or the enum field, was " ++ @tagName(fmt)),
+                const enum_format: Format.Enum = if (options.format) |fmt| switch (fmt) {
+                    .@"enum" => |e_fmt| e_fmt,
+                    else => @compileError("Enum's format should be either null, or the enum field, was " ++ @tagName(fmt)),
                 };
                 const val_str = if (enum_format.namespaced) {
                     var name_buf: [128]u8 = undefined;
@@ -655,16 +677,24 @@ fn writeInternal(self: *Writer, val: anytype, comptime options: Options, comptim
                     return try val.syrupify(self);
                 }
 
-                const syrup_format: ?Format = if (@hasDecl(T, s_syrup_format)) T.syrup_format else null;
-                const format: Format.Union = if (options.format) |fmt|
-                    fmt
-                else if (syrup_format) |fmt| switch (fmt) {
+                const syrup_spec: ?spec.Union = if (@hasDecl(T, s_syrup_spec)) T.syrup_spec else null;
+
+                const format: Format.Union = if (options.format) |fmt| switch (fmt) {
                     .@"union" => |u_fmt| u_fmt,
-                    else => @compileError("syrup_format must be union type in a union, was " ++ @tagName(syrup_format)),
-                } else .{ .record_merge = .symbol };
+                    else => @compileError("options format should be union type."),
+                } else if (syrup_spec) |s_spec| s_spec.format else .{ .dictionary = .symbol };
 
                 if (info.tag_type) |UnionTagType| {
+                    comptime var record_types: [info.fields.len]type = undefined;
+                    comptime var num_record_types = 0;
                     inline for (info.fields) |u_field| {
+                        const is_record = comptime isRecord(u_field.type);
+                        if (format == .record_merge and is_record) {
+                            inline for (record_types[0..num_record_types]) |t|
+                                if (t == u_field.type) @compileError("union " ++ type_name ++ " contained multiple struct/union fields of the same type. This is not allowed when record_merge is selected, because there would be no way to differentiate them.");
+                            record_types[num_record_types] = u_field.type;
+                            num_record_types += 1;
+                        }
                         if (val == @field(UnionTagType, u_field.name)) {
                             const field_val = @field(val, u_field.name);
                             switch (format) {
@@ -674,14 +704,17 @@ fn writeInternal(self: *Writer, val: anytype, comptime options: Options, comptim
                                     try self.write(field_val, .{});
                                     try self.writeDictionaryEnd();
                                 },
-                                .record,
-                                .record_merge,
-                                => |label_fmt| {
-                                    if (!record_merge) {
+                                .record => |label_fmt| {
+                                    try self.writeRecordStartLabeledOptions(u_field.name, .{ .format = .{ .simple = label_fmt } });
+                                    try self.write(field_val, .{});
+                                    try self.writeRecordEnd();
+                                },
+                                .record_merge => |label_fmt| {
+                                    if (!isRecord(u_field.type)) {
                                         try self.writeRecordStartLabeledOptions(u_field.name, .{ .format = .{ .simple = label_fmt } });
                                     }
-                                    try self.writeInternal(field_val, .{}, format == .record_merge);
-                                    if (!record_merge) {
+                                    try self.write(field_val, .{});
+                                    if (!isRecord(u_field.type)) {
                                         try self.writeRecordEnd();
                                     }
                                 },
@@ -1177,22 +1210,21 @@ fn maybeFlushBuffer(self: *Writer) FormatterError!void {
     }
 }
 
-const s_syrup_format = "syrup_format";
+/// While not strictly necessary, this function can be used to assert that all nested structures have been
+/// written properly. Run it when the structure is done being written.
+pub fn finish(self: *Writer) error{NotFinished}!void {
+    if (self.nested_datas.items.len > 0) {
+        return error.NotFinished;
+    }
+}
+
+const s_syrup_spec = "syrup_spec";
 const s_syrupify = "syrupify";
 
 /// Options for `write`.
 pub const Options = struct {
     /// The `Format` to use for the structure.
     format: ?Format = null,
-};
-
-/// Custom wire format of a struct and its fields.
-/// Define a `syrup_format` constant with this type inside a struct to customize it.
-pub const SyrupFormat = struct {
-    /// The `Format.Struct` to use for this struct.
-    format: Format.Struct = .{ .dictionary = .{} },
-    /// The list of `Format` settings for each field, in order. Count must match the field count.
-    fields: ?[]const ?Format = null,
 };
 
 /// Custom format specification for a type.
@@ -1202,7 +1234,7 @@ pub const SyrupFormat = struct {
 /// The system is very flexible and gives you granular control over how a type should be specified. The goal is to
 /// make it easy to implement an externally-specified Syrup model.
 ///
-/// You can specify a value of `Format` in the `options` argument of `write`, or customize an existing struct with a `SyrupFormat` declaration.
+/// You can specify a value of `Format` in the `options` argument of `write`, or customize an existing struct with a `spec.Struct` declaration.
 pub const Format = union(enum) {
     /// Format specification for strings and primitives.
     pub const Simple = enum {
@@ -1259,7 +1291,7 @@ pub const Format = union(enum) {
     ///
     /// const InnerRecord = struct {
     ///     // Tell Syrup to write this struct as a record.
-    ///     const syrup_format = SyrupFormat{
+    ///     const syrup_spec = spec.Struct{
     ///        .format = .{ .record = .{} },
     ///     }
     ///
@@ -1287,13 +1319,12 @@ pub const Format = union(enum) {
         /// - ```<`string` "this is a string">```
         /// - ```<`inner_record` <`Namespace.InnerRecord` "is a" "record with 2 string fields">>```
         record: Simple,
-        /// Same as `Union.record` for all child types *except* record. Child records are 'merged' into the
-        /// parent (union)'s record, i.e., their fields are written directly into the union record instead
-        /// of an inner record. The record's label is the active union field name.
+        /// Same as `Union.record` for all child types *except* record. Child records replace the
+        /// parent (union)'s record, i.e., they are written instead of the union record.
         ///
         /// Examples:
         /// - ```<`string` "this is a string">```
-        /// - ```<`inner_record` "is a" "record with 2 string fields">```
+        /// - ```<`Namespace.InnerRecord` "is a" "record with 2 string fields">```
         record_merge: Simple,
         /// Format as the value directly, without the field name of the union included.
         /// this is useful for unions where each field is a unique type and the types are Records,
@@ -1321,13 +1352,52 @@ pub const Format = union(enum) {
     @"union": Union,
 };
 
-/// While not strictly necessary, this function can be used to assert that all nested structures have been
-/// written properly. Run it when the structure is done being written.
-pub fn finish(self: *Writer) error{NotFinished}!void {
-    if (self.nested_datas.items.len > 0) {
-        return error.NotFinished;
-    }
-}
+/// Custom specifications for the format of structs and unions.
+///
+/// Declare a `syrup_spec` constant with these types inside a Struct or Union you wish
+/// to customize.
+pub const spec = struct {
+    /// Custom wire format of a struct and its fields.
+    ///
+    /// Declare a constant named `syrup_spec` with this type inside a struct to customize it.
+    ///
+    /// Example:
+    /// ```
+    /// const Struct = struct {
+    ///     const syrup_spec = spec.Struct {
+    ///         .format = .{ .record = .{ .name = "op:deliver" },
+    ///     };
+    ///
+    ///     ...
+    /// }
+    /// ```
+    pub const Struct = struct {
+        /// The `Format.Struct` to use for this struct.
+        format: Format.Struct = .{ .dictionary = .{} },
+        /// The list of `Format` settings for each field, in order. Count must match the field count.
+        fields: ?[]const ?Format = null,
+    };
+
+    /// Custom wire format of a union and its fields.
+    ///
+    /// Declare a constant named `syrup_spec` with this type inside a struct to customize it.
+    ///
+    /// Example:
+    /// ```
+    /// const Foo = union(enum) {
+    ///     const syrup_spec = spec.Union{
+    ///         .format = .{ .record_merge = .string },
+    ///     };
+    ///
+    ///     ...
+    /// }
+    /// ```
+    pub const Union = struct {
+        format: Format.Union = .{ .dictionary = .symbol },
+        /// The list of `Format` settings for each field, in order. Count must match the field count.
+        fields: ?[]const ?Format = null,
+    };
+};
 
 /// For testing: Double check we cleared all nested datas.
 fn expectCleanWriterState(self: *Writer) !void {
@@ -1789,7 +1859,7 @@ test "The Grand Menagerie (ocapn spec test data)" {
 
 const MyStruct = struct {
     const Coord = struct {
-        const syrup_format = SyrupFormat{
+        const syrup_spec = spec.Struct{
             .format = .sequence,
         };
 
@@ -1797,7 +1867,7 @@ const MyStruct = struct {
         lon: f64,
     };
 
-    const syrup_format = SyrupFormat{
+    const syrup_spec = spec.Struct{
         .format = .{ .record = .{ .label = .string } },
         .fields = &[_]?Format{
             .{ .simple = .string },
@@ -1855,7 +1925,7 @@ const TestSet = std.StaticStringMap(void);
 const TestKVSet = struct { []const u8 };
 
 const Zoo = struct {
-    const syrup_format = SyrupFormat{
+    const syrup_spec = spec.Struct{
         .format = .{
             .record = .{
                 .name = "zoo",
@@ -1865,7 +1935,7 @@ const Zoo = struct {
     };
 
     const Animal = struct {
-        const syrup_format = SyrupFormat{
+        const syrup_spec = spec.Struct{
             .format = .{ .dictionary = .{ .keys = .symbol } },
             .fields = &[_]?Format{
                 .{ .simple = .data },
@@ -1954,7 +2024,7 @@ test "zon to menagerie" {
     defer output.deinit();
     defer writer.deinit();
 
-    const menagerie = try std.zon.parse.fromSlice(Zoo, std.testing.allocator, zoo_zon, null, .{});
+    const menagerie = try std.zon.parse.fromSliceAlloc(Zoo, std.testing.allocator, zoo_zon, null, .{});
     defer std.zon.parse.free(std.testing.allocator, menagerie);
     try writer.write(&menagerie, .{});
 
@@ -2152,12 +2222,12 @@ test "struct with syrupify" {
     try std.testing.expectEqualStrings("8\"23:35:59", output.written());
 }
 
-test "test union .. why not test ourselves" {
+test "union .. why not test ourselves" {
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
     var writer = Writer.initJSyrup(&output.writer, std.testing.allocator);
     defer output.deinit();
     defer writer.deinit();
-    try writer.write(SyrupFormat{
+    try writer.write(spec.Struct{
         .format = .{ .dictionary = .{ .keys = .symbol } },
         .fields = &[_]?Format{
             .{ .simple = .data },
@@ -2172,15 +2242,38 @@ test "test union .. why not test ourselves" {
             .@"struct" = .{ .record = .{ .label = .string, .name = "MyFunRecord" } },
         },
     });
-    try std.testing.expectEqualStrings("<\"MyFunRecord\" <`dictionary` {`keys`: `symbol`, `values`: false}>, [<`simple` `data`>, <`simple` `string`>, false, false, false, <`set` `data`>]>", output.written());
+    try std.testing.expectEqualStrings("<\"MyFunRecord\" {`dictionary`: {`keys`: `symbol`, `values`: false}}, [{`simple`: `data`}, {`simple`: `string`}, false, false, false, {`set`: `data`}]>", output.written());
 }
+
+// Is there a way to use unit tests to test for a compile error??? probably not?
+// This should fail to compile.
+// const BadUnion = union(enum) {
+//     const Inner = struct {
+//         const syrup_spec = spec.Struct{
+//             .format = .{ .record = .{ .label = .string } },
+//         };
+//
+//         foo: bool,
+//     };
+//
+//     a: Inner,
+//     b: Inner,
+// };
+//
+// test "record_merge invalid union with multiple of same type" {
+//     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+//     var writer = Writer.initJSyrup(&output.writer, std.testing.allocator);
+//     defer output.deinit();
+//     defer writer.deinit();
+//     try writer.write(BadUnion{ .a = .{ .foo = false } }, .{ .format = .{ .@"union" = .{ .record_merge = .string } } });
+// }
 
 // Roll your own ocapn (just a toy set of a couple ocapn models, nothing fancy)
 
 const Desc = struct {
     fn PosObject(name: []const u8) type {
         return struct {
-            const syrup_format = SyrupFormat{
+            const syrup_spec = spec.Struct{
                 .format = .{ .record = .{ .name = name } },
             };
 
@@ -2194,6 +2287,10 @@ const Desc = struct {
     const Answer = PosObject("desc:answer");
 
     const ImportObjectOrPromise = union(enum) {
+        const syrup_spec = spec.Union{
+            .format = .{ .record_merge = .string },
+        };
+
         object: ImportObject,
         promise: ImportPromise,
     };
@@ -2201,7 +2298,7 @@ const Desc = struct {
 
 const Op = struct {
     const Deliver = struct {
-        const syrup_format = SyrupFormat{
+        const syrup_spec = spec.Struct{
             .format = .{ .record = .{ .name = "op:deliver" } },
         };
 
