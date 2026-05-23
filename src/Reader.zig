@@ -277,9 +277,7 @@ fn expectByte(self: *Reader) !u8 {
 
 fn parseFloatValue(T: anytype, slice: []const u8) T {
     const bits = @typeInfo(T).float.bits;
-    const unsigned = @Type(.{
-        .int = .{ .signedness = .unsigned, .bits = bits },
-    });
+    const unsigned = @Int(.signed, bits);
     return @bitCast(std.mem.bigToNative(unsigned, std.mem.bytesAsValue(unsigned, slice).*));
 }
 

@@ -66,7 +66,7 @@ pub fn encode(reader: *std.Io.Reader, writer: *std.Io.Writer, options: EncodeOpt
 
 /// Encode the provided `slice` in base32, and write to `writer`.
 pub fn encodeSlice(slice: []const u8, writer: *std.Io.Writer, options: EncodeOptions) !void {
-    var reader = std.io.Reader.fixed(slice);
+    var reader = std.Io.Reader.fixed(slice);
     try encode(&reader, writer, options);
 }
 

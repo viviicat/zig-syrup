@@ -25,7 +25,7 @@
     .fingerprint = 0x3b5fc2a5c5b2f1a1, // Changing this has security and trust implications.
     // Tracks the earliest Zig version that the package considers to be a
     // supported use case.
-    .minimum_zig_version = "0.15.1",
+    .minimum_zig_version = "0.16.0",
     // Specifies the set of files and directories that are included in this package.
     // Only files and directories listed here are included in the `hash` that
     // is computed for this package. Only files listed here will remain on disk
