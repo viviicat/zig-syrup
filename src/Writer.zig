@@ -1302,7 +1302,7 @@ pub const Format = union(enum) {
     ///
     /// const InnerRecord = struct {
     ///     // Tell Syrup to write this struct as a record.
-    ///     const syrup_spec = spec.Struct{
+    ///     pub const syrup_spec = spec.Struct{
     ///        .format = .{ .record = .{} },
     ///     }
     ///
@@ -1375,7 +1375,7 @@ pub const spec = struct {
     /// Example:
     /// ```
     /// const Struct = struct {
-    ///     const syrup_spec = spec.Struct {
+    ///     pub const syrup_spec = spec.Struct {
     ///         .format = .{ .record = .{ .name = "op:deliver" },
     ///     };
     ///
@@ -1396,7 +1396,7 @@ pub const spec = struct {
     /// Example:
     /// ```
     /// const Foo = union(enum) {
-    ///     const syrup_spec = spec.Union{
+    ///     pub const syrup_spec = spec.Union{
     ///         .format = .{ .record_merge = .string },
     ///     };
     ///
@@ -1870,7 +1870,7 @@ test "The Grand Menagerie (ocapn spec test data)" {
 
 const MyStruct = struct {
     const Coord = struct {
-        const syrup_spec = spec.Struct{
+        pub const syrup_spec = spec.Struct{
             .format = .sequence,
         };
 
@@ -1878,7 +1878,7 @@ const MyStruct = struct {
         lon: f64,
     };
 
-    const syrup_spec = spec.Struct{
+    pub const syrup_spec = spec.Struct{
         .format = .{ .record = .{ .label = .string } },
         .fields = &[_]?Format{
             .{ .simple = .string },
@@ -1936,7 +1936,7 @@ const TestSet = std.StaticStringMap(void);
 const TestKVSet = struct { []const u8 };
 
 const Zoo = struct {
-    const syrup_spec = spec.Struct{
+    pub const syrup_spec = spec.Struct{
         .format = .{
             .record = .{
                 .name = "zoo",
@@ -1946,7 +1946,7 @@ const Zoo = struct {
     };
 
     const Animal = struct {
-        const syrup_spec = spec.Struct{
+        pub const syrup_spec = spec.Struct{
             .format = .{ .dictionary = .{ .keys = .symbol } },
             .fields = &[_]?Format{
                 .{ .simple = .data },
@@ -2260,7 +2260,7 @@ test "union .. why not test ourselves" {
 // This should fail to compile.
 // const BadUnion = union(enum) {
 //     const Inner = struct {
-//         const syrup_spec = spec.Struct{
+//         pub const syrup_spec = spec.Struct{
 //             .format = .{ .record = .{ .label = .string } },
 //         };
 //
@@ -2284,7 +2284,7 @@ test "union .. why not test ourselves" {
 const Desc = struct {
     fn PosObject(name: []const u8) type {
         return struct {
-            const syrup_spec = spec.Struct{
+            pub const syrup_spec = spec.Struct{
                 .format = .{ .record = .{ .name = name } },
             };
 
@@ -2298,7 +2298,7 @@ const Desc = struct {
     const Answer = PosObject("desc:answer");
 
     const ImportObjectOrPromise = union(enum) {
-        const syrup_spec = spec.Union{
+        pub const syrup_spec = spec.Union{
             .format = .{ .record_merge = .string },
         };
 
@@ -2309,7 +2309,7 @@ const Desc = struct {
 
 const Op = struct {
     const Deliver = struct {
-        const syrup_spec = spec.Struct{
+        pub const syrup_spec = spec.Struct{
             .format = .{ .record = .{ .name = "op:deliver" } },
         };
 
@@ -2330,7 +2330,7 @@ test "roll your own ocapn" {
 }
 
 const FancyUnion = union(enum) {
-    const syrup_spec = spec.Union{
+    pub const syrup_spec = spec.Union{
         .fields = &[_]?Format{
             .{ .simple = .string },
             .{ .simple = .symbol },
