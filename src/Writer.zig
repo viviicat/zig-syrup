@@ -609,7 +609,7 @@ pub fn write(self: *Writer, val: anytype, comptime options: Options) WritingErro
                         if (s_spec.fields) |field_formats|
                             field_formats[i]
                         else if (s_spec.format == .dictionary)
-                            s_spec.dictionary.values
+                            s_spec.format.dictionary.values
                         else
                             null
                     else
@@ -687,6 +687,7 @@ pub fn write(self: *Writer, val: anytype, comptime options: Options) WritingErro
                 if (info.tag_type) |UnionTagType| {
                     comptime var record_types: [info.fields.len]type = undefined;
                     comptime var num_record_types = 0;
+                    comptime var i = 0;
                     inline for (info.fields) |u_field| {
                         const is_record = comptime isRecord(u_field.type);
                         if (format == .record_merge and is_record) {
@@ -695,31 +696,41 @@ pub fn write(self: *Writer, val: anytype, comptime options: Options) WritingErro
                             record_types[num_record_types] = u_field.type;
                             num_record_types += 1;
                         }
+
+                        const field_format: ?Format = if (syrup_spec) |s_spec|
+                            if (s_spec.fields) |field_formats|
+                                field_formats[i]
+                            else
+                                null
+                        else
+                            null;
+                        i += 1;
+
                         if (val == @field(UnionTagType, u_field.name)) {
                             const field_val = @field(val, u_field.name);
                             switch (format) {
                                 .dictionary => |key_fmt| {
                                     try self.writeDictionaryStart();
                                     try self.write(u_field.name, .{ .format = .{ .simple = key_fmt } });
-                                    try self.write(field_val, .{});
+                                    try self.write(field_val, .{ .format = field_format });
                                     try self.writeDictionaryEnd();
                                 },
                                 .record => |label_fmt| {
                                     try self.writeRecordStartLabeledOptions(u_field.name, .{ .format = .{ .simple = label_fmt } });
-                                    try self.write(field_val, .{});
+                                    try self.write(field_val, .{ .format = field_format });
                                     try self.writeRecordEnd();
                                 },
                                 .record_merge => |label_fmt| {
                                     if (!isRecord(u_field.type)) {
                                         try self.writeRecordStartLabeledOptions(u_field.name, .{ .format = .{ .simple = label_fmt } });
                                     }
-                                    try self.write(field_val, .{});
+                                    try self.write(field_val, .{ .format = field_format });
                                     if (!isRecord(u_field.type)) {
                                         try self.writeRecordEnd();
                                     }
                                 },
                                 .direct_value => {
-                                    try self.write(field_val, options);
+                                    try self.write(field_val, .{ .format = field_format });
                                 },
                             }
                             break;
@@ -2316,4 +2327,31 @@ test "roll your own ocapn" {
     defer writer.deinit();
     try writer.write(Op.Deliver{ .to_desc = .{ .position = 5 }, .args = &[_]dynamic.Value{.{ .symbol = "make-car-factory" }}, .answer_pos = 3, .@"resolve-me-desc" = .{ .promise = .{ .position = 45 } } }, .{});
     try std.testing.expectEqualStrings("<`op:deliver` <`desc:export` 5>, [`make-car-factory`], 3, <`desc:import-promise` 45>>", output.written());
+}
+
+const FancyUnion = union(enum) {
+    const syrup_spec = spec.Union{
+        .fields = &[_]?Format{
+            .{ .simple = .string },
+            .{ .simple = .symbol },
+            .{ .simple = .data },
+        },
+    };
+
+    a: []const u8,
+    b: []const u8,
+    c: []const u8,
+};
+
+test "union with custom formatted field" {
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    var writer = Writer.initJSyrup(&output.writer, std.testing.allocator);
+    defer output.deinit();
+    defer writer.deinit();
+    try writer.write(&[_]FancyUnion{
+        .{ .a = "hello" },
+        .{ .b = "there" },
+        .{ .c = "general" },
+    }, .{});
+    try std.testing.expectEqualStrings("[{`a`: \"hello\"}, {`b`: `there`}, {`c`: |m5sw4zlsmfwa|}]", output.written());
 }
