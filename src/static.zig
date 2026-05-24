@@ -372,6 +372,12 @@ test "string slices" {
     try std.testing.expectEqualStrings("foobar", parsed_slice.value);
 }
 
+test "nested slices" {
+    const parsed_slice = try parseFromSlice([][]const u8, std.testing.allocator, "[2'hi5:there]", .{});
+    defer parsed_slice.deinit();
+    try std.testing.expectEqualDeep(&[_][]const u8{ "hi", "there" }, parsed_slice.value);
+}
+
 var read_buf: [256]u8 = undefined;
 test "parse with reader" {
     var reader = std.testing.Reader.init(&read_buf, &.{
