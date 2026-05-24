@@ -9,3 +9,9 @@ pub const Error = Writer.Error || Reader.Error;
 comptime {
     std.testing.refAllDecls(@This());
 }
+
+const static = @import("static.zig");
+
+pub const ParseOptions = static.ParseOptions;
+pub const Parsed = static.Parsed;
+pub const parseFromSlice = static.parseFromSlice;

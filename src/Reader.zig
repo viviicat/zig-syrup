@@ -161,6 +161,7 @@ pub const Token = union(enum) {
     /// It could be a positive or negative integer, or a length specifier for data.
     /// In order to continue, we must keep reading.
     /// The reader attempts to avoid this case by using `boundary_scratch`, but if the number string doesn't fit in 64 bytes, it gives up and returns this.
+    /// This slice is not allocated.
     partial_decimal: []const u8,
 
     /// We parsed, and possibly allocated, an integer
@@ -623,6 +624,24 @@ pub fn isNextTokenAllocatable(self: *Reader) !bool {
         .double_continue,
         .end_of_document,
         => false, // if we are already in the midst of getting a value, it's not allocatable.
+    };
+}
+
+/// If true, the next token will be False.
+pub fn isNextTokenFalse(self: *Reader) !bool {
+    return switch (self.state) {
+        .value => switch (try self.expectByte()) {
+            tags.False => true,
+            else => false,
+        },
+        .decimal,
+        .data_continue,
+        .string_continue,
+        .symbol_continue,
+        .float_continue,
+        .double_continue,
+        .end_of_document,
+        => false,
     };
 }
 
