@@ -88,7 +88,7 @@ Zig Types that can be (de)serialized to Syrup
   - [ ] from Sequence (just the field values)
   - [ ] from Dictionary (key is the field name)
 - [ ] unions
-- [ ] tuples
+- [x] tuples
 - [ ] general pointers
 - [ ] `dynamic.Value`
 

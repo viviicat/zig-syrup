@@ -157,7 +157,23 @@ fn innerParse(
                 else => return error.UnexpectedToken,
             }
         },
-        .@"union", .@"struct" => @compileError("not impl"),
+        .@"union" => @compileError("not impl"),
+        .@"struct" => |struct_info| {
+            if (struct_info.is_tuple) {
+                if (.sequence_start != try source.next()) return error.UnexpectedToken;
+
+                var r: T = undefined;
+                inline for (0..struct_info.fields.len) |i| {
+                    r[i] = try innerParse(struct_info.fields[i].type, allocator, source, options);
+                }
+
+                if (.sequence_end != try source.next()) return error.UnexpectedToken;
+
+                return r;
+            }
+
+            @compileError("only tuples right now");
+        },
         .array => |array_info| {
             switch (try source.peekNextTokenType()) {
                 .sequence_start => {
@@ -374,4 +390,10 @@ test "parse vector" {
     defer result.deinit();
 
     try std.testing.expectEqual(@Vector(3, i64){ 3, -4, 8 }, result.value);
+}
+
+test "tuples" {
+    const parsed_slice = try parseFromSlice(struct { []const u8, []const u8, u8 }, std.testing.allocator, "[2'ab3'bab20+]", .{});
+    defer parsed_slice.deinit();
+    try std.testing.expectEqualDeep(.{ "ab", "bab", 20 }, parsed_slice.value);
 }
