@@ -35,7 +35,7 @@ pub const ParseFromValueError = std.fmt.ParseIntError || std.fmt.ParseFloatError
 const s_syrup_parse = "syrupParse";
 
 pub fn ParseError(comptime Source: type) type {
-    return ParseFromValueError || error{InvalidState} || Source.NextError;
+    return ParseFromValueError || error{ InvalidState, UnexpectedAdditionalInput } || Source.NextError;
 }
 
 pub fn parseFromSlice(
@@ -56,6 +56,28 @@ pub fn parseFromSlice(
     var source = Reader.init(parsed.arena.allocator(), &input);
     defer source.deinit();
     parsed.value = try innerParse(T, parsed.arena.allocator(), &source, options);
+    const n = try source.next();
+    if (n != .end_of_document) {
+        return error.UnexpectedAdditionalInput;
+    }
+    return parsed;
+}
+
+pub fn parse(comptime T: type, allocator: Allocator, input: *std.Io.Reader, options: ParseOptions) ParseError(Reader)!Parsed(T) {
+    var parsed = Parsed(T){
+        .arena = try allocator.create(ArenaAllocator),
+        .value = undefined,
+    };
+    errdefer allocator.destroy(parsed.arena);
+    parsed.arena.* = ArenaAllocator.init(allocator);
+    errdefer parsed.arena.deinit();
+
+    var reader = Reader.init(parsed.arena.allocator(), input);
+    defer reader.deinit();
+    parsed.value = try innerParse(T, parsed.arena.allocator(), &reader, options);
+    if (try reader.next() != .end_of_document) {
+        return error.UnexpectedAdditionalInput;
+    }
     return parsed;
 }
 
@@ -113,10 +135,10 @@ fn innerParse(
             }
         },
         .optional => |optional_info| {
-            if (try source.isNextTokenFalse())
-                return null
-            else
-                return try innerParse(optional_info.child, allocator, source, options);
+            if (try source.isNextTokenFalse()) {
+                _ = try source.next();
+                return null;
+            } else return try innerParse(optional_info.child, allocator, source, options);
         },
         .@"enum" => {
             if (std.meta.hasFn(T, s_syrup_parse)) {
@@ -320,4 +342,16 @@ test "string slices" {
     const parsed_slice = try parseFromSlice([]const u8, std.testing.allocator, "6'foobar", .{});
     defer parsed_slice.deinit();
     try std.testing.expectEqualStrings("foobar", parsed_slice.value);
+}
+
+var read_buf: [256]u8 = undefined;
+test "parse with reader" {
+    var reader = std.testing.Reader.init(&read_buf, &.{
+        .{ .buffer = "31\"this is a test! " },
+        .{ .buffer = "of some text :)" },
+    });
+    const result = try parse([]const u8, std.testing.allocator, &reader.interface, .{});
+    defer result.deinit();
+
+    try std.testing.expectEqualStrings("this is a test! of some text :)", result.value);
 }

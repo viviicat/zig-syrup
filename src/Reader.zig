@@ -324,10 +324,7 @@ pub fn peekNextTokenType(self: *Reader) !TokenType {
                     tags.Float => return .f32,
                     tags.Double => return .f64,
                     '0'...'9' => return .decimal,
-                    else => |b| {
-                        std.debug.print("{c}\n", .{b});
-                        return error.SyntaxError;
-                    },
+                    else => return error.SyntaxError,
                 }
             } else return .end_of_document;
         },
