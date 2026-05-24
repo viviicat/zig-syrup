@@ -192,7 +192,15 @@ fn innerParse(
                 else => return error.UnexpectedToken,
             }
         },
-        .vector => @compileError("not impl"),
+        .vector => |vector_info| {
+            switch (try source.peekNextTokenType()) {
+                .sequence_start => {
+                    const A = [vector_info.len]vector_info.child;
+                    return try internalParseSequence(A, vector_info.child, allocator, source, options);
+                },
+                else => return error.UnexpectedToken,
+            }
+        },
         .pointer => |ptr_info| {
             switch (ptr_info.size) {
                 .one => {},
@@ -354,4 +362,16 @@ test "parse with reader" {
     defer result.deinit();
 
     try std.testing.expectEqualStrings("this is a test! of some text :)", result.value);
+}
+
+test "parse vector" {
+    var reader = std.testing.Reader.init(&read_buf, &.{
+        .{ .buffer = "[3+4" },
+        .{ .buffer = "-8" },
+        .{ .buffer = "+]" },
+    });
+    const result = try parse(@Vector(3, i64), std.testing.allocator, &reader.interface, .{});
+    defer result.deinit();
+
+    try std.testing.expectEqual(@Vector(3, i64){ 3, -4, 8 }, result.value);
 }
