@@ -175,6 +175,18 @@ pub const Token = union(enum) {
 
     /// We have reached the end of the document
     end_of_document,
+
+    pub fn deinit(self: *const Token, allocator: Allocator) void {
+        switch (self.*) {
+            .string, .symbol, .data => |data_packet| {
+                data_packet.deinit(allocator);
+            },
+            .int => |int_packet| {
+                int_packet.deinit(allocator);
+            },
+            else => {},
+        }
+    }
 };
 
 /// This is only used in `peekNextTokenType()` and gives a categorization based on the first byte of the next token that will be emitted from a `next*()` call.
@@ -600,6 +612,7 @@ fn nextInternal(self: *Reader) NextError!Token {
                 if (remaining_in_float > remaining_buf_len) {
                     self.cursor = self.input.len - 1;
                     const slice = self.takeValueSlice();
+                    // TODO: fix this with the double-slice technique
                     @memcpy(self.boundary_scratch[self.last_buf_float_data.len..], slice);
                     self.last_buf_float_data = self.boundary_scratch[0 .. self.last_buf_float_data.len + slice.len];
                     try self.refillBufferExpectMore(remaining_in_float - remaining_buf_len);
@@ -608,6 +621,7 @@ fn nextInternal(self: *Reader) NextError!Token {
 
                 self.cursor += remaining_in_float;
                 const slice = self.takeValueSlice();
+                // TODO: fix this with the double-slice technique
                 @memcpy(self.boundary_scratch[self.last_buf_float_data.len..bits], slice);
                 self.last_buf_float_data = self.boundary_scratch[0 .. self.last_buf_float_data.len + slice.len];
                 self.state = .value;
@@ -711,22 +725,32 @@ pub fn isNextTokenAllocatable(self: *Reader) !bool {
     };
 }
 
-/// If true, the next token will be False.
-pub fn isNextTokenFalse(self: *Reader) !bool {
-    return switch (self.state) {
-        .value => switch (try self.expectByte()) {
-            tags.False => true,
-            else => false,
-        },
-        .decimal,
-        .data_continue,
-        .string_continue,
-        .symbol_continue,
-        .float_continue,
-        .double_continue,
-        .end_of_document,
-        => false,
-    };
+/// Compare the provided slice with the next token, which is presumed to be a bytestring-type.
+/// This does not allocate anything.
+pub fn compareNext(self: *Reader, cmp_slice: []const u8) !bool {
+    // Compare iteratively until we have read the entire string
+    var i: usize = 0;
+    while (true) {
+        const token = try self.next();
+        switch (token) {
+            .string, .data, .symbol => |data_packet| {
+                if (data_packet.buffer.len > cmp_slice[i..].len) {
+                    return false;
+                }
+                if (!std.mem.eql(u8, cmp_slice[i..][0..data_packet.buffer.len], data_packet.buffer)) {
+                    return false;
+                }
+
+                if (!data_packet.more) {
+                    return true;
+                }
+
+                i += data_packet.buffer.len;
+            },
+            else => return error.UnexpectedToken,
+        }
+    }
+    unreachable;
 }
 
 /// Read the next token, possibly performing allocations with `default_max_value_len` as the max allocatable length.

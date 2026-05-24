@@ -1240,7 +1240,7 @@ pub fn finish(self: *Writer) error{NotFinished}!void {
     }
 }
 
-const s_syrup_spec = "syrup_spec";
+pub const s_syrup_spec = "syrup_spec";
 const s_syrupify = "syrupify";
 
 /// Options for `write`.

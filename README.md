@@ -63,7 +63,9 @@ Zig Types that can be (de)serialized to Syrup
 - [x] slices
 - [x] vectors
 - [x] `[]const u8`
-- [x] structs 
+- [ ] HashMap - need tests
+- [ ] Set - need tests
+- [x] structs
   - [x] as Record (label is the type name)
   - [x] as Sequence (just the field values)
   - [x] as Dictionary (key is the field name)
@@ -83,9 +85,11 @@ Zig Types that can be (de)serialized to Syrup
 - [x] slices
 - [x] vectors
 - [x] `[]const u8`
-- [ ] structs
-  - [ ] from Record (label is the type name)
-  - [ ] from Sequence (just the field values)
+- [ ] HashMap
+- [ ] Set
+- [x] structs
+  - [x] from Record (label is the type name)
+  - [x] from Sequence (just the field values)
   - [ ] from Dictionary (key is the field name)
 - [ ] unions
 - [x] tuples

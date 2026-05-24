@@ -3,6 +3,8 @@ const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 
 const Reader = @import("Reader.zig");
+const Writer = @import("Writer.zig");
+
 pub fn Parsed(comptime T: type) type {
     return struct {
         arena: *ArenaAllocator,
@@ -35,7 +37,7 @@ pub const ParseFromValueError = std.fmt.ParseIntError || std.fmt.ParseFloatError
 const s_syrup_parse = "syrupParse";
 
 pub fn ParseError(comptime Source: type) type {
-    return ParseFromValueError || error{ InvalidState, UnexpectedAdditionalInput } || Source.NextError;
+    return ParseFromValueError || error{ InvalidState, UnexpectedAdditionalInput, MismatchedTypes } || Source.NextError;
 }
 
 pub fn parseFromSlice(
@@ -98,7 +100,7 @@ fn innerParse(
         },
         .comptime_float => {
             const token = try source.nextAllocMax(allocator, .if_needed, options.max_value_len orelse Reader.default_max_value_len);
-            defer freeAllocated(allocator, token);
+            defer token.deinit(allocator);
 
             switch (token) {
                 .f32, .f64 => |val| return val,
@@ -107,7 +109,7 @@ fn innerParse(
         },
         .float => |f_info| {
             const token = try source.nextAllocMax(allocator, .if_needed, options.max_value_len orelse Reader.default_max_value_len);
-            defer freeAllocated(allocator, token);
+            defer token.deinit(allocator);
 
             switch (f_info.bits) {
                 32 => {
@@ -128,14 +130,14 @@ fn innerParse(
         },
         .int, .comptime_int => {
             const token = try source.nextAllocMax(allocator, .if_needed, options.max_value_len orelse Reader.default_max_value_len);
-            defer freeAllocated(allocator, token);
+            defer token.deinit(allocator);
             switch (token) {
                 .int => |packet| return try packet.toInt(T),
                 else => return error.UnexpectedToken,
             }
         },
         .optional => |optional_info| {
-            if (try source.isNextTokenFalse()) {
+            if (try source.peekNextTokenType() == .false) {
                 _ = try source.next();
                 return null;
             } else return try innerParse(optional_info.child, allocator, source, options);
@@ -146,7 +148,7 @@ fn innerParse(
             }
 
             const token = try source.nextAllocMax(allocator, .if_needed, options.max_value_len orelse Reader.default_max_value_len);
-            defer freeAllocated(allocator, token);
+            defer token.deinit(allocator);
             switch (token) {
                 .int => |int_packet| {
                     return std.enums.fromInt(T, try int_packet.toInt(usize)) orelse return error.InvalidEnumTag;
@@ -157,7 +159,7 @@ fn innerParse(
                 else => return error.UnexpectedToken,
             }
         },
-        .@"union" => @compileError("not impl"),
+        .@"union" => @compileError("not  impl"),
         .@"struct" => |struct_info| {
             if (struct_info.is_tuple) {
                 if (.sequence_start != try source.next()) return error.UnexpectedToken;
@@ -172,7 +174,52 @@ fn innerParse(
                 return r;
             }
 
-            @compileError("only tuples right now");
+            const syrup_spec: ?Writer.spec.Struct = if (@hasDecl(T, Writer.s_syrup_spec)) T.syrup_spec else null;
+            // TODO hash map
+            const start_token = try source.next();
+            const ordered, const starts_with_label = try switch (start_token) {
+                .sequence_start => .{ true, if (syrup_spec) |spec| spec.format == .labeled_sequence else false },
+                .dictionary_start => .{ false, false },
+                .record_start => .{ true, true },
+                else => error.UnexpectedToken,
+            };
+
+            var r: T = undefined;
+
+            if (starts_with_label) {
+                const type_name = if (syrup_spec) |spec|
+                    switch (spec.format) {
+                        .record, .labeled_sequence => |rec| rec.name orelse @typeName(T),
+                        else => @typeName(T),
+                    }
+                else
+                    @typeName(T);
+
+                if (!try source.compareNext(type_name)) {
+                    return error.MismatchedTypes;
+                }
+            }
+
+            if (ordered) {
+                inline for (struct_info.fields) |field| {
+                    if (field.is_comptime) @compileError("comptime fields are not supported: " ++ @typeName(T) ++ "." ++ field.name);
+                    @field(r, field.name) = try innerParse(field.type, allocator, source, options);
+                }
+            } else {
+                // More complex case, we need to find the matching fields and map them as they won't
+                // necessarily be in order (more similar to Json)
+                unreachable; // TODO
+            }
+
+            const end_token = try source.next();
+            switch (start_token) {
+                .dictionary_start => if (end_token != .dictionary_end) return error.UnexpectedToken,
+                .sequence_start => if (end_token != .sequence_end) return error.UnexpectedToken,
+                .record_start => if (end_token != .record_end) return error.UnexpectedToken,
+                else => unreachable,
+            }
+
+            return r;
         },
         .array => |array_info| {
             switch (try source.peekNextTokenType()) {
@@ -278,18 +325,6 @@ fn innerParse(
             }
         },
         else => @compileError("Unable to parse into type '" ++ @typeName(T) ++ "'"),
-    }
-}
-
-fn freeAllocated(allocator: Allocator, token: Reader.Token) void {
-    switch (token) {
-        .string, .symbol, .data => |data_packet| {
-            data_packet.deinit(allocator);
-        },
-        .int => |int_packet| {
-            int_packet.deinit(allocator);
-        },
-        else => {},
     }
 }
 
@@ -419,3 +454,52 @@ test "simple pointer" {
     defer parsed_slice.deinit();
     try std.testing.expectEqualDeep(3, parsed_slice.value.*);
 }
+
+const TestingRecord = struct {
+    pub const syrup_spec = Writer.spec.Struct{
+        .format = .{ .record = .{} },
+    };
+
+    const Pronoun = struct {
+        pub const syrup_spec = Writer.spec.Struct{
+            .format = .{ .labeled_sequence = .{ .name = "rec:prn" } },
+        };
+
+        const Form = enum {
+            singular,
+            plural,
+        };
+
+        value: []const u8,
+        form: Form,
+    };
+
+    const User = struct {
+        pub const syrup_spec = Writer.spec.Struct{
+            .format = .sequence,
+        };
+
+        name: []const u8,
+        pronouns: []const Pronoun,
+    };
+
+    user: User,
+    free_mem: usize,
+};
+
+test "struct!" {
+    const parsed_slice = try parseFromSlice(TestingRecord, std.testing.allocator, "<20'static.TestingRecord[2\"vv[[7'rec:prn3\"she8'singular][7'rec:prn4\"vaer6'plural]]]256+>", .{});
+    defer parsed_slice.deinit();
+    try std.testing.expectEqualDeep(TestingRecord{
+        .free_mem = 256,
+        .user = .{
+            .name = "vv",
+            .pronouns = &[_]TestingRecord.Pronoun{
+                .{ .form = .singular, .value = "she" },
+                .{ .form = .plural, .value = "vaer" },
+            },
+        },
+    }, parsed_slice.value);
+}
+
+test "labeled sequence" {}
