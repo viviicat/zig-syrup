@@ -84,9 +84,9 @@ Zig Types that can be (de)serialized to Syrup
 - [ ] vectors
 - [x] `[]const u8`
 - [ ] structs
-  - [ ] as Record (label is the type name)
-  - [ ] as Sequence (just the field values)
-  - [ ] as Dictionary (key is the field name)
+  - [ ] from Record (label is the type name)
+  - [ ] from Sequence (just the field values)
+  - [ ] from Dictionary (key is the field name)
 - [ ] unions
 - [ ] tuples
 - [ ] general pointers
