@@ -79,10 +79,10 @@ Zig Types that can be (de)serialized to Syrup
 - [x] f64
 - [x] optionals
 - [x] enum literals
-- [ ] arrays
-- [ ] slices
+- [x] arrays
+- [x] slices
 - [ ] vectors
-- [ ] `[]const u8`
+- [x] `[]const u8`
 - [ ] structs
   - [ ] as Record (label is the type name)
   - [ ] as Sequence (just the field values)
