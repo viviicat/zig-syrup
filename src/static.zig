@@ -501,5 +501,3 @@ test "struct!" {
         },
     }, parsed_slice.value);
 }
-
-test "labeled sequence" {}
