@@ -3,8 +3,6 @@ const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 
 const Reader = @import("Reader.zig");
-const tags = @import("tags.zig");
-
 pub fn Parsed(comptime T: type) type {
     return struct {
         arena: *ArenaAllocator,
@@ -37,7 +35,7 @@ pub const ParseFromValueError = std.fmt.ParseIntError || std.fmt.ParseFloatError
 const s_syrup_parse = "syrupParse";
 
 pub fn ParseError(comptime Source: type) type {
-    return ParseFromValueError || Source.NextError;
+    return ParseFromValueError || error{InvalidState} || Source.NextError;
 }
 
 pub fn parseFromSlice(
@@ -137,12 +135,13 @@ fn innerParse(
                 else => return error.UnexpectedToken,
             }
         },
+        .@"union", .@"struct" => @compileError("not impl"),
         .array => |array_info| {
-            switch (try source.expectByte()) {
-                tags.syrup.sequence.Start => {
+            switch (try source.peekNextTokenType()) {
+                .sequence_start => {
                     return internalParseSequence(T, array_info.child, allocator, source, options);
                 },
-                '0'...'9' => {
+                .decimal => {
                     if (array_info.child != u8) return error.UnexpectedToken;
 
                     var r: T = undefined;
@@ -169,6 +168,63 @@ fn innerParse(
                     return r;
                 },
                 else => return error.UnexpectedToken,
+            }
+        },
+        .vector => @compileError("not impl"),
+        .pointer => |ptr_info| {
+            switch (ptr_info.size) {
+                .one => {},
+                .slice => {
+                    switch (try source.peekNextTokenType()) {
+                        .sequence_start => {
+                            _ = try source.next();
+
+                            var arraylist: std.ArrayList(ptr_info.child) = .empty;
+                            while (true) {
+                                switch (try source.peekNextTokenType()) {
+                                    .sequence_end => {
+                                        _ = try source.next();
+                                        break;
+                                    },
+                                    else => {},
+                                }
+
+                                try arraylist.append(allocator, try innerParse(ptr_info.child, allocator, source, options));
+                            }
+
+                            if (ptr_info.sentinel()) |s| {
+                                return try arraylist.toOwnedSliceSentinel(allocator, s);
+                            }
+
+                            return try arraylist.toOwnedSlice(allocator);
+                        },
+                        .decimal => {
+                            // Let us hope it is a string.
+                            if (ptr_info.child != u8) return error.UnexpectedToken;
+
+                            if (ptr_info.sentinel()) |s| {
+                                var value_list: std.ArrayList(u8) = .empty;
+                                _ = try source.allocNextIntoArrayListMax(&value_list, .alloc_always, options.max_value_len orelse Reader.default_max_value_len);
+                                return try value_list.toOwnedSliceSentinel(allocator, s);
+                            }
+                            if (ptr_info.is_const) {
+                                switch (try source.nextAllocMax(allocator, .always, options.max_value_len orelse Reader.default_max_value_len)) {
+                                    inline .string, .data, .symbol => |packet| {
+                                        return packet.buffer;
+                                    },
+                                    else => unreachable,
+                                }
+                            } else {
+                                switch (try source.nextAllocMax(allocator, .always, options.max_value_len orelse Reader.default_max_value_len)) {
+                                    .data, .string, .symbol => |packet| return packet.buffer,
+                                    else => unreachable,
+                                }
+                            }
+                        },
+                        else => return error.UnexpectedToken,
+                    }
+                },
+                else => @compileError("Unable to parse into type '" ++ @typeName(T) ++ "'"),
             }
         },
         else => @compileError("Unable to parse into type '" ++ @typeName(T) ++ "'"),
@@ -258,4 +314,10 @@ test "bytestrings" {
     try std.testing.expectEqualStrings("sym", &parsed_slice.value[0]);
     try std.testing.expectEqualStrings("str", &parsed_slice.value[1]);
     try std.testing.expectEqualStrings("byt", &parsed_slice.value[2]);
+}
+
+test "string slices" {
+    const parsed_slice = try parseFromSlice([]const u8, std.testing.allocator, "6'foobar", .{});
+    defer parsed_slice.deinit();
+    try std.testing.expectEqualStrings("foobar", parsed_slice.value);
 }

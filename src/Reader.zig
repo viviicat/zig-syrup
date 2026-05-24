@@ -177,6 +177,24 @@ pub const Token = union(enum) {
     end_of_document,
 };
 
+/// This is only used in `peekNextTokenType()` and gives a categorization based on the first byte of the next token that will be emitted from a `next*()` call.
+pub const TokenType = enum {
+    sequence_start,
+    sequence_end,
+    record_start,
+    record_end,
+    set_start,
+    set_end,
+    dictionary_start,
+    dictionary_end,
+    true,
+    false,
+    f32,
+    f64,
+    end_of_document,
+    decimal,
+};
+
 const State = enum {
     /// We are parsing a value
     value,
@@ -268,12 +286,81 @@ fn takeValueString(self: *Reader) ![]const u8 {
     return slice;
 }
 
-pub fn expectByte(self: *Reader) !u8 {
+fn peekByte(self: *Reader) !?u8 {
+    if (self.cursor >= self.input.len) {
+        try self.refillBuffer();
+        if (self.is_end_of_input) {
+            return null;
+        }
+    }
+
+    return self.input[self.cursor];
+}
+
+fn expectByte(self: *Reader) !u8 {
     if (self.cursor >= self.input.len) {
         try self.refillBufferExpectMore(1);
     }
 
     return self.input[self.cursor];
+}
+
+// Can only be used to peek token type when in the Value state (just starting to parse a vallue)
+pub fn peekNextTokenType(self: *Reader) !TokenType {
+    switch (self.state) {
+        .value => {
+            if (try self.peekByte()) |byte| {
+                switch (byte) {
+                    tags.sequence.Start => return .sequence_start,
+                    tags.sequence.End => return .sequence_end,
+                    tags.record.Start => return .record_start,
+                    tags.record.End => return .record_end,
+                    tags.set.Start => return .set_start,
+                    tags.set.End => return .set_end,
+                    tags.dictionary.Start => return .dictionary_start,
+                    tags.dictionary.End => return .dictionary_end,
+                    tags.True => return .true,
+                    tags.False => return .false,
+                    tags.Float => return .f32,
+                    tags.Double => return .f64,
+                    '0'...'9' => return .decimal,
+                    else => |b| {
+                        std.debug.print("{c}\n", .{b});
+                        return error.SyntaxError;
+                    },
+                }
+            } else return .end_of_document;
+        },
+        else => return error.InvalidState,
+    }
+}
+
+pub fn allocNextIntoArrayListMax(self: *Reader, value_list: *std.ArrayList(u8), allocator: Allocator, when: AllocWhen, max_value_len: usize) NextError!?[]const u8 {
+    while (true) {
+        const token = try self.next();
+        switch (token) {
+            .int => |int_packet| {
+                if (when == .if_needed and value_list.items.len == 0) {
+                    return int_packet.buffer;
+                }
+                try appendSlice(value_list, allocator, int_packet.buffer, max_value_len);
+                return null;
+            },
+            .data, .string, .symbol => |data_packet| {
+                if (when == .if_needed and value_list.items.len == 0) {
+                    return data_packet.buffer;
+                }
+
+                if (data_packet.more) {
+                    try appendSlice(value_list, data_packet.buffer, max_value_len);
+                }
+
+                try appendSlice(value_list, allocator, data_packet.buffer, max_value_len);
+                return null;
+            },
+            else => unreachable, // Only number and string token types are allowed.
+        }
+    }
 }
 
 fn parseFloatValue(T: anytype, slice: []const u8) T {
