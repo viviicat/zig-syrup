@@ -162,7 +162,7 @@ fn innerParse(
 
                                 i += packet.buffer.len;
                             },
-                            else => error.UnexpectedToken,
+                            else => return error.UnexpectedToken,
                         }
                     }
 
@@ -250,4 +250,12 @@ test "arrays" {
     const parsed_slice = try parseFromSlice([3]i23, std.testing.allocator, "[685+11-89+]", .{});
     defer parsed_slice.deinit();
     try std.testing.expectEqual([_]i23{ 685, -11, 89 }, parsed_slice.value);
+}
+
+test "bytestrings" {
+    const parsed_slice = try parseFromSlice([3][3]u8, std.testing.allocator, "[3'sym3\"str3:byt]", .{});
+    defer parsed_slice.deinit();
+    try std.testing.expectEqualStrings("sym", &parsed_slice.value[0]);
+    try std.testing.expectEqualStrings("str", &parsed_slice.value[1]);
+    try std.testing.expectEqualStrings("byt", &parsed_slice.value[2]);
 }
