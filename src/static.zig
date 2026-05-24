@@ -165,8 +165,8 @@ fn innerParse(
                 if (.sequence_start != try source.next()) return error.UnexpectedToken;
 
                 var r: T = undefined;
-                inline for (0..struct_info.fields.len) |i| {
-                    r[i] = try innerParse(struct_info.fields[i].type, allocator, source, options);
+                inline for (struct_info.fields, 0..) |field, i| {
+                    r[i] = try innerParse(field.type, allocator, source, options);
                 }
 
                 if (.sequence_end != try source.next()) return error.UnexpectedToken;
@@ -206,9 +206,40 @@ fn innerParse(
                     @field(r, field.name) = try innerParse(field.type, allocator, source, options);
                 }
             } else {
-                // More complex case, we need to find the matching fields and map them as they won't
-                // necessarily be in order (more similar to Json)
-                unreachable; // TODO
+                var fields_seen: [struct_info.fields.len]bool = @splat(false);
+
+                while (true) {
+                    const name_token: Reader.Token = try source.nextAllocMax(allocator, .if_needed, options.max_value_len orelse Reader.default_max_value_len);
+                    const parsed_field_name_packet: Reader.DataPacket = switch (name_token) {
+                        inline .string, .data, .symbol => |packet| packet,
+                        .dictionary_end => {
+                            break;
+                        },
+                        else => {
+                            return error.UnexpectedToken;
+                        },
+                    };
+
+                    inline for (struct_info.fields, 0..) |field, i| {
+                        if (field.is_comptime) @compileError("comptime fields are not supported: " ++ @typeName(T) ++ "." ++ field.name);
+                        if (std.mem.eql(u8, field.name, parsed_field_name_packet.buffer)) {
+                            parsed_field_name_packet.deinit(allocator);
+
+                            if (fields_seen[i]) {
+                                // For now this is the only option, json parser has some options we might want.
+                                return error.DuplicateField;
+                            }
+
+                            @field(r, field.name) = try innerParse(field.type, allocator, source, options);
+                            fields_seen[i] = true;
+                            break;
+                        }
+                    }
+                }
+
+                try fillDefaultStructValues(T, &r, &fields_seen);
+
+                return r; // Already parsed the end token.
             }
 
             const end_token = try source.next();
@@ -347,6 +378,18 @@ fn internalParseSequence(
     return r;
 }
 
+fn fillDefaultStructValues(comptime T: type, r: *T, fields_seen: *[@typeInfo(T).@"struct".fields.len]bool) !void {
+    inline for (@typeInfo(T).@"struct".fields, 0..) |field, i| {
+        if (!fields_seen[i]) {
+            if (field.defaultValue()) |default| {
+                @field(r, field.name) = default;
+            } else {
+                return error.MissingField;
+            }
+        }
+    }
+}
+
 test parseFromSlice {
     const parsed_int = try parseFromSlice(i64, std.testing.allocator, "456+", .{});
     defer parsed_int.deinit();
@@ -474,6 +517,13 @@ const TestingRecord = struct {
         form: Form,
     };
 
+    const Flags = struct {
+        happy: bool = false,
+        hungry: bool = true,
+        tired: bool,
+        excited: bool,
+    };
+
     const User = struct {
         pub const syrup_spec = Writer.spec.Struct{
             .format = .sequence,
@@ -481,6 +531,7 @@ const TestingRecord = struct {
 
         name: []const u8,
         pronouns: []const Pronoun,
+        flags: Flags,
     };
 
     user: User,
@@ -488,12 +539,13 @@ const TestingRecord = struct {
 };
 
 test "struct!" {
-    const parsed_slice = try parseFromSlice(TestingRecord, std.testing.allocator, "<20'static.TestingRecord[2\"vv[[7'rec:prn3\"she8'singular][7'rec:prn4\"vaer6'plural]]]256+>", .{});
+    const parsed_slice = try parseFromSlice(TestingRecord, std.testing.allocator, "<20'static.TestingRecord[2\"vv[[7'rec:prn3\"she8'singular][7'rec:prn4\"vaer6'plural]]{5'happyf6'hungryt5'tiredf7'excitedt}]256+>", .{});
     defer parsed_slice.deinit();
     try std.testing.expectEqualDeep(TestingRecord{
         .free_mem = 256,
         .user = .{
             .name = "vv",
+            .flags = .{ .excited = true, .tired = false },
             .pronouns = &[_]TestingRecord.Pronoun{
                 .{ .form = .singular, .value = "she" },
                 .{ .form = .plural, .value = "vaer" },
