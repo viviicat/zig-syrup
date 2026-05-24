@@ -1298,6 +1298,8 @@ pub const Format = union(enum) {
 
     /// Format specification for an enum type.
     pub const Enum = struct {
+        // TODO: we may want to support writing the value as an int
+
         /// The format of the enum's value.
         value: Simple = .symbol,
         /// Whether or not to prefix the value with a type name ("EnumType.foo" instead of "foo")
