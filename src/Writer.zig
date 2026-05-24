@@ -19,9 +19,9 @@
 const std = @import("std");
 
 const base32 = @import("base32.zig");
+const CollectionMode = @import("collections.zig").CollectionMode;
 const dynamic = @import("dynamic.zig");
 const tags = @import("tags.zig");
-const CollectionMode = @import("collections.zig").CollectionMode;
 
 const Writer = @This();
 

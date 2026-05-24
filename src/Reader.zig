@@ -2,8 +2,9 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
-const tags = @import("tags.zig").syrup;
+
 const CollectionMode = @import("collections.zig").CollectionMode;
+const tags = @import("tags.zig").syrup;
 
 const Reader = @This();
 
