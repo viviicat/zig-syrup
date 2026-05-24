@@ -90,7 +90,7 @@ Zig Types that can be (de)serialized to Syrup
 - [x] structs
   - [x] from Record (label is the type name)
   - [x] from Sequence (just the field values)
-  - [ ] from Dictionary (key is the field name)
+  - [x] from Dictionary (key is the field name)
 - [ ] unions
 - [x] tuples
 - [x] general pointers
