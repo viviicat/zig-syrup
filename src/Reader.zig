@@ -268,7 +268,7 @@ fn takeValueString(self: *Reader) ![]const u8 {
     return slice;
 }
 
-fn expectByte(self: *Reader) !u8 {
+pub fn expectByte(self: *Reader) !u8 {
     if (self.cursor >= self.input.len) {
         try self.refillBufferExpectMore(1);
     }

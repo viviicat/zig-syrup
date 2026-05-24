@@ -3,6 +3,7 @@ const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 
 const Reader = @import("Reader.zig");
+const tags = @import("tags.zig");
 
 pub fn Parsed(comptime T: type) type {
     return struct {
@@ -136,6 +137,40 @@ fn innerParse(
                 else => return error.UnexpectedToken,
             }
         },
+        .array => |array_info| {
+            switch (try source.expectByte()) {
+                tags.syrup.sequence.Start => {
+                    return internalParseSequence(T, array_info.child, allocator, source, options);
+                },
+                '0'...'9' => {
+                    if (array_info.child != u8) return error.UnexpectedToken;
+
+                    var r: T = undefined;
+                    var i: usize = 0;
+                    // Keep parsing the bytestring and copying to result without unnecessary allocation.
+                    while (true) {
+                        switch (try source.next()) {
+                            .data, .string, .symbol => |packet| {
+                                if (packet.more) {
+                                    if (i + packet.buffer.len > r.len) return error.LengthMismatch;
+                                    @memcpy(r[i..][0..packet.buffer.len], packet.buffer);
+                                } else {
+                                    if (i + packet.buffer.len != r.len) return error.LengthMismatch;
+                                    @memcpy(r[i..][0..packet.buffer.len], packet.buffer);
+                                    break;
+                                }
+
+                                i += packet.buffer.len;
+                            },
+                            else => error.UnexpectedToken,
+                        }
+                    }
+
+                    return r;
+                },
+                else => return error.UnexpectedToken,
+            }
+        },
         else => @compileError("Unable to parse into type '" ++ @typeName(T) ++ "'"),
     }
 }
@@ -150,6 +185,25 @@ fn freeAllocated(allocator: Allocator, token: Reader.Token) void {
         },
         else => {},
     }
+}
+
+fn internalParseSequence(
+    comptime T: type,
+    comptime Child: type,
+    allocator: Allocator,
+    source: *Reader,
+    options: ParseOptions,
+) !T {
+    std.debug.assert(.sequence_start == try source.next());
+
+    var r: T = undefined;
+    for (&r) |*elem| {
+        elem.* = try innerParse(Child, allocator, source, options);
+    }
+
+    if (.sequence_end != try source.next()) return error.UnexpectedToken;
+
+    return r;
 }
 
 test parseFromSlice {
@@ -190,4 +244,10 @@ test "non-exhaustive enum" {
     const parsed_enum = try parseFromSlice(TestNonExhaustEnum, std.testing.allocator, "685+", .{});
     defer parsed_enum.deinit();
     try std.testing.expectEqual(685, @intFromEnum(parsed_enum.value));
+}
+
+test "arrays" {
+    const parsed_slice = try parseFromSlice([3]i23, std.testing.allocator, "[685+11-89+]", .{});
+    defer parsed_slice.deinit();
+    try std.testing.expectEqual([_]i23{ 685, -11, 89 }, parsed_slice.value);
 }
