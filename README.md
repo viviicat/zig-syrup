@@ -89,7 +89,7 @@ Zig Types that can be (de)serialized to Syrup
   - [ ] from Dictionary (key is the field name)
 - [ ] unions
 - [x] tuples
-- [ ] general pointers
+- [x] general pointers
 - [ ] `dynamic.Value`
 
 ## Benchmark

@@ -219,7 +219,11 @@ fn innerParse(
         },
         .pointer => |ptr_info| {
             switch (ptr_info.size) {
-                .one => {},
+                .one => {
+                    const r: *ptr_info.child = try allocator.create(ptr_info.child);
+                    r.* = try innerParse(ptr_info.child, allocator, source, options);
+                    return r;
+                },
                 .slice => {
                     switch (try source.peekNextTokenType()) {
                         .sequence_start => {
@@ -396,4 +400,10 @@ test "tuples" {
     const parsed_slice = try parseFromSlice(struct { []const u8, []const u8, u8 }, std.testing.allocator, "[2'ab3'bab20+]", .{});
     defer parsed_slice.deinit();
     try std.testing.expectEqualDeep(.{ "ab", "bab", 20 }, parsed_slice.value);
+}
+
+test "simple pointer" {
+    const parsed_slice = try parseFromSlice(*i3, std.testing.allocator, "3+", .{});
+    defer parsed_slice.deinit();
+    try std.testing.expectEqualDeep(3, parsed_slice.value.*);
 }
