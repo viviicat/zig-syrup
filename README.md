@@ -74,11 +74,11 @@ Zig Types that can be (de)serialized to Syrup
 
 ### Reader
 
-- [ ] integers (any length)
-- [ ] f32
-- [ ] f64
-- [ ] optionals
-- [ ] enum literals
+- [x] integers (any length)
+- [x] f32
+- [x] f64
+- [x] optionals
+- [x] enum literals
 - [ ] arrays
 - [ ] slices
 - [ ] vectors
