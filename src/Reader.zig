@@ -1,4 +1,12 @@
 //! Low level Syrup parser, modeled after `std.json.Reader` and `std.json.Scanner`.
+//!
+//! If you want to simply parse syrup into a Zig type, use `parseFromSlice` or `parse` instead.
+
+// For the docs
+const static = @import("static.zig");
+const parseFromSlice = static.parseFromSlice;
+const parse = static.parse;
+
 const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
