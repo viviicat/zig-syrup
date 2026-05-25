@@ -4,6 +4,10 @@ const ArenaAllocator = std.heap.ArenaAllocator;
 
 const Reader = @import("Reader.zig");
 const Writer = @import("Writer.zig");
+const dynamic = @import("dynamic.zig");
+
+// XXX TODO WARNING: This can potentially result in an infinitely large structure,
+// dictated by the input. We need to establish limits.
 
 /// A value that has been parsed by `parse` or similar.
 pub fn Parsed(comptime T: type) type {
@@ -175,6 +179,10 @@ fn innerParse(
                 return T.syrupParse(allocator, source, options);
             }
 
+            if (T == dynamic.Value) {
+                return try internalParseValue(allocator, source, options);
+            }
+
             if (union_info.tag_type == null) @compileError("Unable to parse into untagged union '" ++ @typeName(T) ++ "'");
 
             const syrup_spec: ?Writer.spec.Union = if (@hasDecl(T, Writer.s_syrup_spec)) T.syrup_spec else null;
@@ -204,6 +212,11 @@ fn innerParse(
             var result: T = undefined;
             inline for (union_info.fields) |u_field| {
                 const field_info = @typeInfo(u_field.type);
+
+                if (syrup_spec) |spec| {
+                    if (spec.format == .record_merge and field_info == .@"union") @compileError("Unable to deserialize unions which contain unions in record_merge mode!");
+                }
+
                 if (read_record_field_label or field_info != .@"struct") {
                     if (std.mem.eql(u8, u_field.name, name_label_packet.buffer)) {
                         name_label_packet.deinit(allocator);
@@ -427,7 +440,7 @@ fn innerParse(
 
                             if (ptr_info.sentinel()) |s| {
                                 var value_list: std.ArrayList(u8) = .empty;
-                                _ = try source.allocNextIntoArrayListMax(&value_list, .alloc_always, options.max_value_len orelse Reader.default_max_value_len);
+                                _ = try source.allocNextIntoArrayListMax(&value_list, .always, options.max_value_len orelse Reader.default_max_value_len);
                                 return try value_list.toOwnedSliceSentinel(allocator, s);
                             }
                             if (ptr_info.is_const) {
@@ -471,6 +484,112 @@ fn internalParseSequence(
     if (.sequence_end != try source.next()) return error.UnexpectedToken;
 
     return r;
+}
+
+/// Parse a `dynamic.Value` from the source.
+fn internalParseValue(allocator: Allocator, source: *Reader, options: ParseOptions) !dynamic.Value {
+    switch (try source.peekNextTokenType()) {
+        .true => {
+            _ = try source.next();
+            return .true;
+        },
+        .false => {
+            _ = try source.next();
+            return .false;
+        },
+        .dictionary_start,
+        .record_start,
+        .sequence_start,
+        .set_start,
+        => |start_token| {
+            _ = try source.next();
+
+            const label: ?*const dynamic.Value = if (start_token == .record_start)
+                try innerParse(*const dynamic.Value, allocator, source, options)
+            else
+                null;
+
+            var array_list: std.ArrayList(dynamic.Value) = .empty;
+            while (true) {
+                switch (try source.peekNextTokenType()) {
+                    .dictionary_end => if (start_token == .dictionary_start)
+                        break
+                    else
+                        return error.UnexpectedToken,
+                    .set_end => if (start_token == .set_start)
+                        break
+                    else
+                        return error.UnexpectedToken,
+                    .sequence_end => if (start_token == .sequence_start)
+                        break
+                    else
+                        return error.UnexpectedToken,
+                    .record_end => if (start_token == .record_start)
+                        break
+                    else
+                        return error.UnexpectedToken,
+                    .sequence_start,
+                    .record_start,
+                    .set_start,
+                    .dictionary_start,
+                    .true,
+                    .false,
+                    .f32,
+                    .f64,
+                    .decimal,
+                    => {},
+                    else => return error.UnexpectedToken,
+                }
+
+                try array_list.append(allocator, try innerParse(dynamic.Value, allocator, source, options));
+            }
+
+            // Consume end token matched above
+            _ = try source.next();
+
+            const slice = try array_list.toOwnedSlice(allocator);
+
+            switch (start_token) {
+                .dictionary_start => return .{ .dictionary = slice },
+                .set_start => return .{ .set = slice },
+                .sequence_start => return .{ .sequence = slice },
+                .record_start => return .{
+                    .record = .{
+                        .label = label.?,
+                        .fields = slice,
+                    },
+                },
+                else => unreachable,
+            }
+        },
+        .f32 => {
+            return .{ .f32 = try innerParse(f32, allocator, source, options) };
+        },
+        .f64 => {
+            return .{ .f64 = try innerParse(f64, allocator, source, options) };
+        },
+        .decimal => {
+            // Either it's a number, or a string-like. Let's figure out which it is.
+            const token = try source.nextAllocMax(allocator, .always, options.max_value_len orelse Reader.default_max_value_len);
+            switch (token) {
+                .int => |packet| {
+                    const val = packet.toIntValue();
+                    token.deinit(allocator); // no longer needed.
+                    return val;
+                },
+                .string => |packet| return .{ .string = packet.buffer },
+                .data => |packet| return .{ .data = packet.buffer },
+                .symbol => |packet| return .{ .symbol = packet.buffer },
+                else => return error.UnexpectedToken,
+            }
+        },
+        .sequence_end,
+        .set_end,
+        .dictionary_end,
+        .record_end,
+        .end_of_document,
+        => return error.UnexpectedToken,
+    }
 }
 
 fn fillDefaultStructValues(comptime T: type, r: *T, fields_seen: *[@typeInfo(T).@"struct".fields.len]bool) !void {
@@ -697,5 +816,35 @@ test "dictionary union" {
             .{ .a = 48, .b = 56 },
             .{ .a = 43, .b = -51 },
         } },
+    }, parsed_slice.value);
+}
+
+test "dynamic" {
+    const parsed_slice = try parseFromSlice(dynamic.Value, std.testing.allocator, "56-", .{});
+    defer parsed_slice.deinit();
+    try std.testing.expectEqual(dynamic.Value{ .int = .{ .i32 = -56 } }, parsed_slice.value);
+}
+
+const DynamicyStruct = struct {
+    a: i32,
+    b: []const u8,
+    c: dynamic.Value,
+};
+
+test "struct with dynamic" {
+    const parsed_slice = try parseFromSlice(DynamicyStruct, std.testing.allocator, "{1'a303903-1'b5\"hello1'c<5'c-val68+4\"beep>}", .{});
+    defer parsed_slice.deinit();
+    try std.testing.expectEqualDeep(DynamicyStruct{
+        .a = -303903,
+        .b = "hello",
+        .c = .{
+            .record = .{
+                .label = &.{ .symbol = "c-val" },
+                .fields = &[_]dynamic.Value{
+                    .{ .int = .{ .i32 = 68 } },
+                    .{ .string = "beep" },
+                },
+            },
+        },
     }, parsed_slice.value);
 }

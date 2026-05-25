@@ -13,6 +13,7 @@ const Allocator = std.mem.Allocator;
 
 const CollectionMode = @import("collections.zig").CollectionMode;
 const tags = @import("tags.zig").syrup;
+const dynamic = @import("dynamic.zig");
 
 const Reader = @This();
 
@@ -77,6 +78,17 @@ pub const IntPacket = struct {
         return self.storage == other.storage and
             self.sign == other.sign and
             std.mem.eql(u8, self.buffer, other.buffer);
+    }
+
+    /// Convert from `IntPacket` to a `dynamic.Value` (must fit in 128-bit signed integer)
+    pub fn toIntValue(self: IntPacket) std.fmt.ParseIntError!dynamic.Value {
+        const int32 = self.toInt(i32) catch {
+            const int64 = self.toInt(i64) catch {
+                return .{ .int = .{ .i128 = try self.toInt(i128) } };
+            };
+            return .{ .int = .{ .i64 = int64 } };
+        };
+        return .{ .int = .{ .i32 = int32 } };
     }
 
     /// Convert from `IntPacket` to any integer that can fit it.
