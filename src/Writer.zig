@@ -702,10 +702,13 @@ pub fn write(self: *Writer, val: anytype, comptime options: Options) WritingErro
                     inline for (info.fields) |u_field| {
                         const is_record = comptime isRecord(u_field.type);
                         if (format == .record_merge and is_record) {
-                            inline for (record_types[0..num_record_types]) |t|
+                            if (@typeInfo(u_field.type) == .@"union") @compileError("union " ++ type_name ++ " contained a nested union. This is not allowed when record_merge is selected, because it would be very difficult to determine the selected field when deserializing.");
+
+                            inline for (record_types[0..num_record_types]) |t| {
                                 if (t == u_field.type) @compileError("union " ++ type_name ++ " contained multiple struct/union fields of the same type. This is not allowed when record_merge is selected, because there would be no way to differentiate them.");
-                            record_types[num_record_types] = u_field.type;
-                            num_record_types += 1;
+                                record_types[num_record_types] = u_field.type;
+                                num_record_types += 1;
+                            }
                         }
 
                         const field_format: ?Format = if (syrup_spec) |s_spec|
@@ -1331,7 +1334,7 @@ pub const Format = union(enum) {
         ///
         /// Examples:
         /// - ```{`string`: "this is a string"}```
-        /// - ```{`inner_record`: <`Namespace.InnerRecord` "is a" "record with 2 string fields">}```
+        /// - ```{`inner_record`: <`Namespace.InnerRecord` "is a", "record with 2 string fields">}```
         dictionary: Simple,
         /// Format as a single-item Record with the label being the union's active field name
         /// with specified `Simple` type of string and the record's only entry being the child value.
@@ -1340,14 +1343,14 @@ pub const Format = union(enum) {
         ///
         /// Examples:
         /// - ```<`string` "this is a string">```
-        /// - ```<`inner_record` <`Namespace.InnerRecord` "is a" "record with 2 string fields">>```
+        /// - ```<`inner_record` <`Namespace.InnerRecord` "is a", "record with 2 string fields">>```
         record: Simple,
         /// Same as `Union.record` for all child types *except* record. Child records replace the
         /// parent (union)'s record, i.e., they are written instead of the union record.
         ///
         /// Examples:
         /// - ```<`string` "this is a string">```
-        /// - ```<`Namespace.InnerRecord` "is a" "record with 2 string fields">```
+        /// - ```<`Namespace.InnerRecord` "is a", "record with 2 string fields">```
         record_merge: Simple,
     };
 

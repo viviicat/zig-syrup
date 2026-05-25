@@ -170,8 +170,92 @@ fn innerParse(
                 else => return error.UnexpectedToken,
             }
         },
-        .@"union" => @compileError("not  impl"),
+        .@"union" => |union_info| {
+            if (std.meta.hasFn(T, s_syrup_parse)) {
+                return T.syrupParse(allocator, source, options);
+            }
+
+            if (union_info.tag_type == null) @compileError("Unable to parse into untagged union '" ++ @typeName(T) ++ "'");
+
+            const syrup_spec: ?Writer.spec.Union = if (@hasDecl(T, Writer.s_syrup_spec)) T.syrup_spec else null;
+            // TODO hash map
+            const start_token = try source.next();
+            const read_record_field_label: bool = blk: switch (start_token) {
+                .dictionary_start => true,
+                .record_start => {
+                    if (syrup_spec) |spec| {
+                        if (spec.format == .record_merge) {
+                            break :blk false;
+                        }
+                    }
+                    break :blk true;
+                },
+                else => {
+                    return error.UnexpectedToken;
+                },
+            };
+
+            const name_token: Reader.Token = try source.nextAllocMax(allocator, .if_needed, options.max_value_len orelse Reader.default_max_value_len);
+            const name_label_packet = switch (name_token) {
+                inline .data, .symbol, .string => |packet| packet,
+                else => return error.UnexpectedToken,
+            };
+
+            var result: T = undefined;
+            inline for (union_info.fields) |u_field| {
+                const field_info = @typeInfo(u_field.type);
+                if (read_record_field_label or field_info != .@"struct") {
+                    if (std.mem.eql(u8, u_field.name, name_label_packet.buffer)) {
+                        name_label_packet.deinit(allocator);
+
+                        result = @unionInit(T, u_field.name, try innerParse(u_field.type, allocator, source, options));
+                        break;
+                    }
+                } else {
+                    // In this branch of code, we definitely read a struct in record format, and we
+                    // need to match on the type based on the parsed label. Need to check for a spec,
+                    // in case the struct was renamed.
+                    const field_spec: ?Writer.spec.Struct = if (@hasDecl(u_field.type, Writer.s_syrup_spec)) u_field.type.syrup_spec else null;
+                    const type_name = if (field_spec) |spec|
+                        switch (spec.format) {
+                            .record => |rec| rec.name orelse @typeName(u_field.type),
+                            else => @typeName(u_field.type),
+                        }
+                    else
+                        @typeName(u_field.type);
+
+                    if (std.mem.eql(u8, type_name, name_label_packet.buffer)) {
+                        name_label_packet.deinit(allocator);
+                        // We matched. Cannot call unionInit directly, because we already parsed the
+                        // record start and label! So we will manually assign fields.
+                        var f: u_field.type = undefined;
+                        inline for (@typeInfo(u_field.type).@"struct".fields) |inner_field| {
+                            if (inner_field.is_comptime) @compileError("comptime fields are not supported: " ++ @typeName(T) ++ "." ++ inner_field.name);
+                            @field(f, inner_field.name) = try innerParse(inner_field.type, allocator, source, options);
+                        }
+
+                        result = @unionInit(T, u_field.name, f);
+                        break;
+                    }
+                }
+            } else {
+                return error.UnknownField;
+            }
+
+            const end_token = try source.next();
+            switch (start_token) {
+                .dictionary_start => if (end_token != .dictionary_end) return error.UnexpectedToken,
+                .record_start => if (end_token != .record_end) return error.UnexpectedToken,
+                else => unreachable,
+            }
+
+            return result;
+        },
         .@"struct" => |struct_info| {
+            if (std.meta.hasFn(T, s_syrup_parse)) {
+                return T.syrupParse(allocator, source, options);
+            }
+
             if (struct_info.is_tuple) {
                 if (.sequence_start != try source.next()) return error.UnexpectedToken;
 
@@ -562,5 +646,56 @@ test "struct!" {
                 .{ .form = .plural, .value = "vaer" },
             },
         },
+    }, parsed_slice.value);
+}
+
+const UnionTest = union(enum) {
+    const syrup_spec = Writer.spec.Union{ .format = .{ .record_merge = .symbol } };
+    const Foo = struct {
+        const syrup_spec = Writer.spec.Struct{ .format = .{ .record = .{} } };
+
+        a: i64,
+        b: i64,
+    };
+
+    foo: Foo,
+    bar: u64,
+    multi_foo: []const Foo,
+};
+
+test "union" {
+    const parsed_slice = try parseFromSlice([]const UnionTest, std.testing.allocator, "[<20'static.UnionTest.Foo42+56+><3'bar45+><9'multi_foo[<20'static.UnionTest.Foo48+56+><20'static.UnionTest.Foo43+51->]>]", .{});
+    defer parsed_slice.deinit();
+    try std.testing.expectEqualDeep(&[_]UnionTest{
+        .{ .foo = .{ .a = 42, .b = 56 } },
+        .{ .bar = 45 },
+        .{ .multi_foo = &[_]UnionTest.Foo{
+            .{ .a = 48, .b = 56 },
+            .{ .a = 43, .b = -51 },
+        } },
+    }, parsed_slice.value);
+}
+
+const DictUnionTest = union(enum) {
+    const Foo = struct {
+        a: i64,
+        b: i64,
+    };
+
+    foo: Foo,
+    bar: u64,
+    multi_foo: []const Foo,
+};
+
+test "dictionary union" {
+    const parsed_slice = try parseFromSlice([]const DictUnionTest, std.testing.allocator, "[{3'foo{1'a55+1'b99-}}{3'bar45+}{9'multi_foo[{1'a48+1'b56+}{1'a43+1'b51-}]}]", .{});
+    defer parsed_slice.deinit();
+    try std.testing.expectEqualDeep(&[_]DictUnionTest{
+        .{ .foo = .{ .a = 55, .b = -99 } },
+        .{ .bar = 45 },
+        .{ .multi_foo = &[_]DictUnionTest.Foo{
+            .{ .a = 48, .b = 56 },
+            .{ .a = 43, .b = -51 },
+        } },
     }, parsed_slice.value);
 }
