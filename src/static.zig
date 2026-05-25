@@ -5,11 +5,13 @@ const ArenaAllocator = std.heap.ArenaAllocator;
 const Reader = @import("Reader.zig");
 const Writer = @import("Writer.zig");
 
+/// A value that has been parsed by `parse` or similar.
 pub fn Parsed(comptime T: type) type {
     return struct {
         arena: *ArenaAllocator,
         value: T,
 
+        /// Free all resources allocated inside the value.
         pub fn deinit(self: @This()) void {
             const allocator = self.arena.child_allocator;
             self.arena.deinit();
@@ -18,7 +20,9 @@ pub fn Parsed(comptime T: type) type {
     };
 }
 
+/// Options for parsing.
 pub const ParseOptions = struct {
+    /// The maximum length a string-like value can have. If not set, defaults to 4MB.
     max_value_len: ?usize = null,
 };
 
@@ -40,6 +44,7 @@ pub fn ParseError(comptime Source: type) type {
     return ParseFromValueError || error{ InvalidState, UnexpectedAdditionalInput, MismatchedTypes } || Source.NextError;
 }
 
+/// Parse a value of the provided type directly from a slice of Syrup.
 pub fn parseFromSlice(
     comptime T: type,
     allocator: Allocator,
@@ -65,7 +70,13 @@ pub fn parseFromSlice(
     return parsed;
 }
 
-pub fn parse(comptime T: type, allocator: Allocator, input: *std.Io.Reader, options: ParseOptions) ParseError(Reader)!Parsed(T) {
+/// Parse a value of the provided type from a `std.Io.Reader` that is outputting binary Syrup.
+pub fn parse(
+    comptime T: type,
+    allocator: Allocator,
+    input: *std.Io.Reader,
+    options: ParseOptions,
+) ParseError(Reader)!Parsed(T) {
     var parsed = Parsed(T){
         .arena = try allocator.create(ArenaAllocator),
         .value = undefined,
@@ -463,7 +474,7 @@ test "nested data slices" {
 }
 
 var read_buf: [256]u8 = undefined;
-test "parse with reader" {
+test parse {
     var reader = std.testing.Reader.init(&read_buf, &.{
         .{ .buffer = "31\"this is a test! " },
         .{ .buffer = "of some text :)" },
