@@ -740,9 +740,6 @@ pub fn write(self: *Writer, val: anytype, comptime options: Options) WritingErro
                                         try self.writeRecordEnd();
                                     }
                                 },
-                                .direct_value => {
-                                    try self.write(field_val, .{ .format = field_format });
-                                },
                             }
                             break;
                         }
@@ -1352,14 +1349,6 @@ pub const Format = union(enum) {
         /// - ```<`string` "this is a string">```
         /// - ```<`Namespace.InnerRecord` "is a" "record with 2 string fields">```
         record_merge: Simple,
-        /// Format as the value directly, without the field name of the union included.
-        /// this is useful for unions where each field is a unique type and the types are Records,
-        /// or if you don't need to know the active field type and want to avoid nesting.
-        ///
-        /// Examples:
-        /// - ```"this is a string"```
-        /// - ```<`inner_record` "is a" "record with 2 string fields">```
-        direct_value,
     };
 
     /// We are formatting a sequence.
