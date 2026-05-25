@@ -8,11 +8,7 @@ See [The Syrup Specification](https://github.com/ocapn/syrup/blob/master/draft-s
 
 ## Documentation
 
-I'll probably add some build script for this, but for now, to browse documentation:
-
-1. `zig build-lib -femit-docs src/root.zig` to build docs into docs/
-2. `python -m http.server 8080 -d docs/` (or some other similar minimal web server)
-3. Go to [localhost:8080](http://localhost:8080) (idk why i'm even explaining this)
+[Documentation](https://vvv.gay/docs/zig-syrup) is available using the standard Zig documentation browser.
 
 ## Implemented data types
 
