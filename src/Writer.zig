@@ -562,53 +562,57 @@ pub fn write(self: *Writer, val: anytype, comptime options: Options) WritingErro
                 else
                     null;
 
-                // Tuples default to a sequence.
-                const write_sequence = (format == null and struct_info.is_tuple) or
-                    (format != null and (format.? == .sequence or format.? == .labeled_sequence));
-                if (write_sequence) {
-                    try self.writeSequenceStart();
-                    if (format) |fmt| {
-                        if (fmt == .labeled_sequence) {
-                            const seq_label_format: Format = .{ .simple = fmt.labeled_sequence.label };
-                            const seq_type_name = fmt.labeled_sequence.name orelse type_name;
-                            try self.write(seq_type_name, .{
-                                .format = seq_label_format,
-                            });
-                        }
+                // Structure type (dictionary, record, sequence)
+                // Sequences can be any of the 3 types, depending on the format.
+                const structure_type = if (format) |fmt|
+                    switch (fmt) {
+                        .sequence => .sequence,
+                        .sequence_dictionary, .dictionary => .dictionary,
+                        .sequence_record, .record => .record,
                     }
-                } else if (format == null or format.? == .dictionary) {
-                    // Other structs default to a dictionary.
-                    try self.writeDictionaryStart();
-                } else if (format != null and format.? == .record) {
-                    const record_label_format: Format = .{
-                        .simple = if (format) |fmt|
-                            fmt.record.label
-                        else
-                            .symbol,
-                    };
+                else if (struct_info.is_tuple) .sequence else .dictionary;
 
-                    const rec_type_name = if (format) |fmt|
-                        fmt.record.name orelse type_name
+                // Container type: what it's wrapped in.
+                const container_type: CollectionMode = if (format) |fmt|
+                    switch (fmt) {
+                        .sequence, .sequence_dictionary, .sequence_record => .sequence,
+                        .record => .record,
+                        .dictionary => .dictionary,
+                    }
+                else if (struct_info.is_tuple) .sequence else .dictionary;
+
+                switch (container_type) {
+                    .sequence => try self.writeSequenceStart(),
+                    .record => try self.writeRecordStart(),
+                    .dictionary => try self.writeDictionaryStart(),
+                    .set => unreachable,
+                }
+
+                if (structure_type == .record) {
+                    const label_name, const label_format: Format.Simple = if (format) |fmt|
+                        switch (fmt) {
+                            inline .record, .sequence_record => |rec| .{ rec.name orelse type_name, rec.label orelse .symbol },
+                            else => unreachable,
+                        }
                     else
-                        type_name;
+                        .{ type_name, .symbol };
 
-                    try self.writeRecordStartLabeledOptions(rec_type_name, .{
-                        .format = record_label_format,
-                    });
+                    try self.write(label_name, .{ .format = .{ .simple = label_format } });
                 }
 
                 comptime var i = 0;
                 inline for (struct_info.fields) |Field| {
-                    if (!write_sequence and
-                        (format == null or format.? == .dictionary))
-                    {
+                    if (structure_type == .dictionary) {
                         // Default to symbols as dictionary keys
                         try self.write(
                             Field.name,
                             .{
                                 .format = .{
                                     .simple = if (format) |fmt|
-                                        fmt.dictionary.keys
+                                        switch (fmt) {
+                                            inline .sequence_dictionary, .dictionary => |d| d.keys orelse .symbol,
+                                            else => unreachable,
+                                        }
                                     else
                                         .symbol,
                                 },
@@ -621,6 +625,8 @@ pub fn write(self: *Writer, val: anytype, comptime options: Options) WritingErro
                             field_formats[i]
                         else if (s_spec.format == .dictionary)
                             s_spec.format.dictionary.values
+                        else if (s_spec.format == .sequence_dictionary)
+                            s_spec.format.sequence_dictionary.values
                         else
                             null
                     else
@@ -630,12 +636,12 @@ pub fn write(self: *Writer, val: anytype, comptime options: Options) WritingErro
                     i += 1;
                 }
 
-                if (write_sequence) {
-                    return try self.writeSequenceEnd();
-                } else if (format == null or format.? == .dictionary) {
-                    return try self.writeDictionaryEnd();
+                switch (container_type) {
+                    .sequence => try self.writeSequenceEnd(),
+                    .record => try self.writeRecordEnd(),
+                    .dictionary => try self.writeDictionaryEnd(),
+                    .set => unreachable,
                 }
-                return try self.writeRecordEnd();
             },
             .@"enum" => |enum_info| {
                 if (std.meta.hasFn(T, s_syrupify)) {
@@ -1292,8 +1298,10 @@ pub const Format = union(enum) {
         record: Record,
         /// Format the struct as a sequence of field values.
         sequence,
-        /// Format the struct as a sequence starting with a label and followed by the field values.
-        labeled_sequence: Record,
+        /// Format the struct as a sequence of key-value pairs, similar to a Dictionary.
+        sequence_dictionary: Dictionary,
+        /// Format the struct as a sequence starting with a label and followed by the field values, similar to a Record
+        sequence_record: Record,
     };
 
     /// Format specification for an enum type.
@@ -2377,9 +2385,22 @@ test "struct with labeled sequence" {
         SequenceStruct{ .party_time = true, .num_friends = 45 },
         .{
             .format = .{
-                .@"struct" = .{ .labeled_sequence = .{ .name = "fun-sequence", .label = .symbol } },
+                .@"struct" = .{ .sequence_record = .{ .name = "fun-sequence", .label = .symbol } },
             },
         },
     );
     try std.testing.expectEqualStrings("[12'fun-sequencet45+]", output.written());
+}
+
+test "sequence in dictionary style" {
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    var writer = Writer.init(&output.writer, std.testing.allocator);
+    defer output.deinit();
+    defer writer.deinit();
+    try writer.write(.{ .a = 24, .b = -67 }, .{
+        .format = .{
+            .@"struct" = .{ .sequence_dictionary = .{} },
+        },
+    });
+    try std.testing.expectEqualStrings("[1'a24+1'b67-]", output.written());
 }

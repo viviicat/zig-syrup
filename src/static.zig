@@ -2,6 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 
+const CollectionMode = @import("collections.zig").CollectionMode;
 const Reader = @import("Reader.zig");
 const Writer = @import("Writer.zig");
 const dynamic = @import("dynamic.zig");
@@ -285,19 +286,25 @@ fn innerParse(
             const syrup_spec: ?Writer.spec.Struct = if (@hasDecl(T, Writer.s_syrup_spec)) T.syrup_spec else null;
             // TODO hash map
             const start_token = try source.next();
-            const ordered, const starts_with_label = try switch (start_token) {
-                .sequence_start => .{ true, if (syrup_spec) |spec| spec.format == .labeled_sequence else false },
-                .dictionary_start => .{ false, false },
-                .record_start => .{ true, true },
-                else => error.UnexpectedToken,
+
+            const structure_type: CollectionMode = switch (start_token) {
+                .sequence_start => if (syrup_spec) |spec| switch (spec.format) {
+                    .sequence => .sequence,
+                    .sequence_record => .record,
+                    .sequence_dictionary => .dictionary,
+                    else => return error.UnexpectedToken,
+                } else if (struct_info.is_tuple) .sequence else .dictionary,
+                .dictionary_start => .dictionary,
+                .record_start => .record,
+                else => return error.UnexpectedToken,
             };
 
             var r: T = undefined;
 
-            if (starts_with_label) {
+            if (structure_type == .record) {
                 const type_name = if (syrup_spec) |spec|
                     switch (spec.format) {
-                        .record, .labeled_sequence => |rec| rec.name orelse @typeName(T),
+                        inline .record, .sequence_record => |rec| rec.name orelse @typeName(T),
                         else => @typeName(T),
                     }
                 else
@@ -308,7 +315,7 @@ fn innerParse(
                 }
             }
 
-            if (ordered) {
+            if (structure_type != .dictionary) {
                 inline for (struct_info.fields) |field| {
                     if (field.is_comptime) @compileError("comptime fields are not supported: " ++ @typeName(T) ++ "." ++ field.name);
                     @field(r, field.name) = try innerParse(field.type, allocator, source, options);
@@ -320,12 +327,18 @@ fn innerParse(
                     const name_token: Reader.Token = try source.nextAllocMax(allocator, .if_needed, options.max_value_len orelse Reader.default_max_value_len);
                     const parsed_field_name_packet: Reader.DataPacket = switch (name_token) {
                         inline .string, .data, .symbol => |packet| packet,
-                        .dictionary_end => {
-                            break;
-                        },
-                        else => {
-                            return error.UnexpectedToken;
-                        },
+
+                        .dictionary_end => if (start_token == .dictionary_start)
+                            break
+                        else
+                            return error.UnexpectedToken,
+
+                        .sequence_end => if (start_token == .sequence_start)
+                            break
+                        else
+                            return error.UnexpectedToken,
+
+                        else => return error.UnexpectedToken,
                     };
 
                     inline for (struct_info.fields, 0..) |field, i| {
@@ -719,7 +732,7 @@ const TestingRecord = struct {
 
     const Pronoun = struct {
         pub const syrup_spec = Writer.spec.Struct{
-            .format = .{ .labeled_sequence = .{ .name = "rec:prn" } },
+            .format = .{ .sequence_record = .{ .name = "rec:prn" } },
         };
 
         const Form = enum {
@@ -847,4 +860,18 @@ test "struct with dynamic" {
             },
         },
     }, parsed_slice.value);
+}
+
+const DictArr = struct {
+    const syrup_spec = Writer.spec.Struct{ .format = .{ .sequence_dictionary = .{} } };
+    s: [32]u8,
+    q: [32]u8,
+};
+
+test "dictionary-like array of bytestrings" {
+    const parsed = try parseFromSlice(DictArr, std.testing.allocator, "[1's32:588483848485838484838382838582831'q32:99999999999999999999999999999999]", .{});
+    defer parsed.deinit();
+
+    const res: [32]u8 = "58848384848583848483838283858283".*;
+    try std.testing.expectEqual(res, parsed.value.s);
 }
