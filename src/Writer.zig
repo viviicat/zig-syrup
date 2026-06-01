@@ -49,7 +49,7 @@ const ParsingError = error{
 
 const FormatterError = std.Io.Writer.Error || std.Io.Reader.Error;
 pub const FlatError = FormatterError || std.mem.Allocator.Error;
-pub const WritingError = UnderflowError || ParsingError || FlatError || error{NoSpaceLeft};
+pub const WritingError = UnderflowError || ParsingError || FlatError || error{ NoSpaceLeft, NotFinished };
 
 pub const Error = UnderflowError || ParsingError || error{NotFinished};
 

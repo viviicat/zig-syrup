@@ -16,3 +16,5 @@ pub const ParseOptions = static.ParseOptions;
 pub const Parsed = static.Parsed;
 pub const parseFromSlice = static.parseFromSlice;
 pub const parse = static.parse;
+
+pub const ParseError = static.ParseError(Reader);
