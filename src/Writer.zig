@@ -2464,3 +2464,26 @@ test "sequence in dictionary style" {
     });
     try std.testing.expectEqualStrings("[1'a24+1'b67-]", output.written());
 }
+
+const MapUnion = union(enum) {
+    set: TestRuntimeSet,
+    map: TestRuntimeMap,
+};
+
+test "union of hash maps" {
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    var writer = Writer.init(&output.writer, std.testing.allocator);
+    defer output.deinit();
+    defer writer.deinit();
+
+    var map: TestRuntimeMap = .empty;
+    defer map.deinit(std.testing.allocator);
+
+    try map.put(std.testing.allocator, "boop", .{ .num_friends = 1, .party_time = true });
+
+    try writer.write(&[_]MapUnion{
+        .{ .set = .empty },
+        .{ .map = map },
+    }, .{});
+    try std.testing.expectEqualStrings("[{3'set#$}{3'map{4'boop{10'party_timet11'num_friends1+}}}]", output.written());
+}
