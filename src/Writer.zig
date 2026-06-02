@@ -494,10 +494,7 @@ pub fn write(self: *Writer, val: anytype, comptime options: Options) WritingErro
 
                             // Support both a standard HashMap that has a keyIterator, and the StaticStringMap which just has a keys function.
                             if (std.meta.hasFn(T, "keyIterator")) {
-                                for (val.keys()) |key| {
-                                    try self.write(key, val_options);
-                                }
-                                var i = 0;
+                                var i: usize = 0;
                                 var it = val.keyIterator();
                                 while (it.next()) |key| : (i += 1) {
                                     try self.write(key, val_options);
@@ -2066,7 +2063,6 @@ test "static dictionary hashmap" {
 }
 
 const TestRuntimeMap = std.StringHashMapUnmanaged(SequenceStruct);
-const TestRuntimeKVMap = struct { []const u8, SequenceStruct };
 
 test "runtime dictionary hashmap" {
     var foo: TestRuntimeMap = .empty;
@@ -2084,6 +2080,26 @@ test "runtime dictionary hashmap" {
     try writer.write(foo, .{});
 
     try std.testing.expectEqualSlices(u8, "{1'b{10'party_timef11'num_friends48+}1'f{10'party_timef11'num_friends0+}1'o{10'party_timet11'num_friends2+}}", output.written());
+}
+
+const TestRuntimeSet = std.StringHashMapUnmanaged(void);
+
+test "runtime set" {
+    var foo: TestRuntimeSet = .empty;
+    defer foo.deinit(std.testing.allocator);
+
+    try foo.put(std.testing.allocator, "f", {});
+    try foo.put(std.testing.allocator, "o", {});
+    try foo.put(std.testing.allocator, "b", {});
+
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    var writer = Writer.init(&output.writer, std.testing.allocator);
+    defer output.deinit();
+    defer writer.deinit();
+
+    try writer.write(foo, .{});
+
+    try std.testing.expectEqualSlices(u8, "#1\"b1\"f1\"o$", output.written());
 }
 
 test "zon to menagerie" {
