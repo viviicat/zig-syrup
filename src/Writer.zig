@@ -499,9 +499,8 @@ pub fn write(self: *Writer, val: anytype, comptime options: Options) WritingErro
                                 }
                                 var i = 0;
                                 var it = val.keyIterator();
-                                while (it.next()) |key| {
+                                while (it.next()) |key| : (i += 1) {
                                     try self.write(key, val_options);
-                                    i += 1;
                                 }
                             } else if (std.meta.hasFn(T, "keys")) {
                                 for (val.keys()) |key| {
@@ -522,12 +521,11 @@ pub fn write(self: *Writer, val: anytype, comptime options: Options) WritingErro
                             try self.writeDictionaryStart();
                             // Support both a standard HashMap that has an iterator, and the StaticStringMap which just has a kvs field
                             if (std.meta.hasFn(T, "iterator")) {
-                                var i = 0;
+                                var i: usize = 0;
                                 var it = val.iterator();
-                                while (it.next()) |kv| {
-                                    try self.write(kv.key, key_options);
-                                    try self.write(kv.value, value_options);
-                                    i += 1;
+                                while (it.next()) |kv| : (i += 1) {
+                                    try self.write(kv.key_ptr, key_options);
+                                    try self.write(kv.value_ptr, value_options);
                                 }
                             } else if (std.meta.hasFn(T, "keys")) {
                                 for (0..val.kvs.len) |i| {
@@ -2066,7 +2064,27 @@ test "static dictionary hashmap" {
 
     try std.testing.expectEqualSlices(u8, "{1'b{10'party_timef11'num_friends48+}1'f{10'party_timef11'num_friends0+}1'o{10'party_timet11'num_friends2+}}", output.written());
 }
-test "non-static dictionary hashmap" {}
+
+const TestRuntimeMap = std.StringHashMapUnmanaged(SequenceStruct);
+const TestRuntimeKVMap = struct { []const u8, SequenceStruct };
+
+test "runtime dictionary hashmap" {
+    var foo: TestRuntimeMap = .empty;
+    defer foo.deinit(std.testing.allocator);
+
+    try foo.put(std.testing.allocator, "f", .{ .party_time = false, .num_friends = 0 });
+    try foo.put(std.testing.allocator, "o", .{ .party_time = true, .num_friends = 2 });
+    try foo.put(std.testing.allocator, "b", .{ .party_time = false, .num_friends = 48 });
+
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    var writer = Writer.init(&output.writer, std.testing.allocator);
+    defer output.deinit();
+    defer writer.deinit();
+
+    try writer.write(foo, .{});
+
+    try std.testing.expectEqualSlices(u8, "{1'b{10'party_timef11'num_friends48+}1'f{10'party_timef11'num_friends0+}1'o{10'party_timet11'num_friends2+}}", output.written());
+}
 
 test "zon to menagerie" {
     const zoo_zon = @embedFile("test-data/zoo.zon");
