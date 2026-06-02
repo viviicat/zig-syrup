@@ -488,7 +488,7 @@ pub fn write(self: *Writer, val: anytype, comptime options: Options) WritingErro
                             else
                                 null;
 
-                            const val_options = Options{ .format = format };
+                            const val_options = Options{ .format = .{ .simple = format } };
 
                             try self.writeSetStart();
 
@@ -516,8 +516,8 @@ pub fn write(self: *Writer, val: anytype, comptime options: Options) WritingErro
                                 else => @compileError("Found what looks like a dictionary (has a KV decl with non-void value) but the format specified for it was not `.dictionary`."),
                             } else .{};
 
-                            const key_options = Options{ .format = format.keys };
-                            const value_options = Options{ .format = format.values };
+                            const key_options = Options{ .format = .{ .simple = format.keys orelse .symbol } };
+                            const value_options = Options{ .format = if (format.values) |v_fmt| .{ .simple = v_fmt } else null };
 
                             try self.writeDictionaryStart();
                             // Support both a standard HashMap that has an iterator, and the StaticStringMap which just has a kvs field
@@ -555,7 +555,7 @@ pub fn write(self: *Writer, val: anytype, comptime options: Options) WritingErro
                 const format: ?Format.Struct = if (options.format) |fmt|
                     switch (fmt) {
                         .@"struct" => |st| st,
-                        else => @compileError("write options specified non-struct format for struct " ++ type_name),
+                        else => @compileError(std.fmt.comptimePrint("write options specified non-struct format for struct {s}: {any}", .{ type_name, options.format })),
                     }
                 else if (syrup_spec) |s_spec|
                     s_spec.format
@@ -589,34 +589,32 @@ pub fn write(self: *Writer, val: anytype, comptime options: Options) WritingErro
                 }
 
                 if (structure_type == .record) {
-                    const label_name, const label_format: Format.Simple = if (format) |fmt|
+                    const label_name, const label_format: *const Format = if (format) |fmt|
                         switch (fmt) {
-                            inline .record, .sequence_record => |rec| .{ rec.name orelse type_name, rec.label orelse .symbol },
+                            inline .record, .sequence_record => |rec| .{ rec.name orelse type_name, rec.label orelse &Writer.Format{ .simple = .symbol } },
                             else => unreachable,
                         }
                     else
-                        .{ type_name, .symbol };
+                        .{ type_name, &.{ .simple = .symbol } };
 
-                    try self.write(label_name, .{ .format = .{ .simple = label_format } });
+                    try self.write(label_name, .{ .format = label_format.* });
                 }
 
                 comptime var i = 0;
                 inline for (struct_info.fields) |Field| {
                     if (structure_type == .dictionary) {
                         // Default to symbols as dictionary keys
+                        const key_fmt: *const Format = if (format) |fmt|
+                            switch (fmt) {
+                                inline .sequence_dictionary, .dictionary => |d| d.keys orelse &.{ .simple = .symbol },
+                                else => unreachable,
+                            }
+                        else
+                            &.{ .simple = .symbol };
+
                         try self.write(
                             Field.name,
-                            .{
-                                .format = .{
-                                    .simple = if (format) |fmt|
-                                        switch (fmt) {
-                                            inline .sequence_dictionary, .dictionary => |d| d.keys orelse .symbol,
-                                            else => unreachable,
-                                        }
-                                    else
-                                        .symbol,
-                                },
-                            },
+                            .{ .format = key_fmt.* },
                         );
                     }
 
@@ -1277,15 +1275,15 @@ pub const Format = union(enum) {
     /// Format specification for a dictionary type.
     pub const Dictionary = struct {
         /// The format of the dictionary keys.
-        keys: ?Simple = null,
+        keys: ?*const Format = null,
         /// The format of the dictionary values.
-        values: ?Simple = null,
+        values: ?*const Format = null,
     };
 
     /// Format specification for a record type.
     pub const Record = struct {
         /// The format of the record's label.
-        label: ?Simple = null,
+        label: ?*const Format = null,
         /// Custom name for the record (will appear as the label).
         name: ?[]const u8 = null,
     };
@@ -1894,7 +1892,7 @@ const MyStruct = struct {
     };
 
     pub const syrup_spec = spec.Struct{
-        .format = .{ .record = .{ .label = .string } },
+        .format = .{ .record = .{ .label = &.{ .simple = .string } } },
         .fields = &[_]?Format{
             .{ .simple = .string },
             .{ .simple = .symbol },
@@ -1947,22 +1945,19 @@ test "wire format" {
     );
 }
 
-const TestSet = std.StaticStringMap(void);
-const TestKVSet = struct { []const u8 };
-
 const Zoo = struct {
     pub const syrup_spec = spec.Struct{
         .format = .{
             .record = .{
                 .name = "zoo",
-                .label = .data,
+                .label = &.{ .simple = .data },
             },
         },
     };
 
     const Animal = struct {
         pub const syrup_spec = spec.Struct{
-            .format = .{ .dictionary = .{ .keys = .symbol } },
+            .format = .{ .dictionary = .{ .keys = &.{ .simple = .symbol } } },
             .fields = &[_]?Format{
                 .{ .simple = .data },
                 .{ .simple = .string },
@@ -1986,17 +1981,6 @@ const Zoo = struct {
 };
 
 test "zig type menagerie" {
-
-    //const tabatha_eats = TestSet.initComptime(
-    //    &[_]TestKVSet{ .{"mice"}, .{"fish"}, .{"kibble"} },
-    //);
-    //const george_eats = TestSet.initComptime(
-    //    &[_]TestKVSet{ .{"bananas"}, .{"insects"} },
-    //);
-    //const casper_eats = TestSet.initComptime(
-    //    &[_]TestKVSet{},
-    //);
-
     const menagerie = Zoo{
         .name = "The Grand Menagerie",
         .animals = &[_]Zoo.Animal{
@@ -2037,9 +2021,51 @@ test "zig type menagerie" {
     try std.testing.expectEqualSlices(u8, zoo_bin, output.written());
 }
 
-// TODO!
-test "non-static hashmap" {}
-test "static dictionary hashmap" {}
+const TestSet = std.StaticStringMap(void);
+const TestKVSet = struct { []const u8 };
+
+test "static set" {
+    const tabatha_eats = TestSet.initComptime(
+        &[_]TestKVSet{ .{"mice"}, .{"fish"}, .{"kibble"} },
+    );
+    const george_eats = TestSet.initComptime(
+        &[_]TestKVSet{ .{"bananas"}, .{"insects"} },
+    );
+    const casper_eats = TestSet.initComptime(
+        &[_]TestKVSet{},
+    );
+
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    var writer = Writer.init(&output.writer, std.testing.allocator);
+    defer output.deinit();
+    defer writer.deinit();
+
+    try writer.write(.{ .tabatha = tabatha_eats, .george = george_eats, .casper = casper_eats }, .{});
+
+    try std.testing.expectEqualSlices(u8, "{6'casper#$6'george#7\"bananas7\"insects$7'tabatha#4\"fish4\"mice6\"kibble$}", output.written());
+}
+
+const TestMap = std.StaticStringMap(SequenceStruct);
+const TestKVMap = struct { []const u8, SequenceStruct };
+
+test "static dictionary hashmap" {
+    const foo = TestMap.initComptime(
+        &[_]TestKVMap{
+            .{ "f", .{ .party_time = false, .num_friends = 0 } },
+            .{ "o", .{ .party_time = true, .num_friends = 2 } },
+            .{ "b", .{ .party_time = false, .num_friends = 48 } },
+        },
+    );
+
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    var writer = Writer.init(&output.writer, std.testing.allocator);
+    defer output.deinit();
+    defer writer.deinit();
+
+    try writer.write(foo, .{});
+
+    try std.testing.expectEqualSlices(u8, "{1'b{10'party_timef11'num_friends48+}1'f{10'party_timef11'num_friends0+}1'o{10'party_timet11'num_friends2+}}", output.written());
+}
 test "non-static dictionary hashmap" {}
 
 test "zon to menagerie" {
@@ -2254,7 +2280,7 @@ test "union .. why not test ourselves" {
     defer output.deinit();
     defer writer.deinit();
     try writer.write(spec.Struct{
-        .format = .{ .dictionary = .{ .keys = .symbol } },
+        .format = .{ .dictionary = .{ .keys = &.{ .simple = .symbol } } },
         .fields = &[_]?Format{
             .{ .simple = .data },
             .{ .simple = .string },
@@ -2265,10 +2291,10 @@ test "union .. why not test ourselves" {
         },
     }, .{
         .format = .{
-            .@"struct" = .{ .record = .{ .label = .string, .name = "MyFunRecord" } },
+            .@"struct" = .{ .record = .{ .label = &.{ .simple = .string }, .name = "MyFunRecord" } },
         },
     });
-    try std.testing.expectEqualStrings("<\"MyFunRecord\" {`dictionary`: {`keys`: `symbol`, `values`: false}}, [{`simple`: `data`}, {`simple`: `string`}, false, false, false, {`set`: `data`}]>", output.written());
+    try std.testing.expectEqualStrings("<\"MyFunRecord\" {`dictionary`: {`keys`: {`simple`: `symbol`}, `values`: false}}, [{`simple`: `data`}, {`simple`: `string`}, false, false, false, {`set`: `data`}]>", output.written());
 }
 
 // Is there a way to use unit tests to test for a compile error??? probably not?
@@ -2385,7 +2411,7 @@ test "struct with labeled sequence" {
         SequenceStruct{ .party_time = true, .num_friends = 45 },
         .{
             .format = .{
-                .@"struct" = .{ .sequence_record = .{ .name = "fun-sequence", .label = .symbol } },
+                .@"struct" = .{ .sequence_record = .{ .name = "fun-sequence", .label = &.{ .simple = .symbol } } },
             },
         },
     );
