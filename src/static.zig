@@ -187,7 +187,6 @@ fn innerParse(
             if (union_info.tag_type == null) @compileError("Unable to parse into untagged union '" ++ @typeName(T) ++ "'");
 
             const syrup_spec: ?Writer.spec.Union = if (@hasDecl(T, Writer.s_syrup_spec)) T.syrup_spec else null;
-            // TODO hash map
             const start_token = try source.next();
             const read_record_field_label: bool = blk: switch (start_token) {
                 .dictionary_start => true,
@@ -218,7 +217,12 @@ fn innerParse(
                     if (spec.format == .record_merge and field_info == .@"union") @compileError("Unable to deserialize unions which contain unions in record_merge mode!");
                 }
 
-                if (read_record_field_label or field_info != .@"struct") {
+                // Need to check this at comptime to avoid comptime evaluation of the 'else' case for managed dictionaries!
+                const is_hash_map_like = field_info == .@"struct" and
+                    @hasDecl(u_field.type, "KV") and
+                    (@hasDecl(u_field.type, "empty") or std.meta.hasFn(u_field.type, "init"));
+
+                if (read_record_field_label or is_hash_map_like or field_info != .@"struct") {
                     if (std.mem.eql(u8, u_field.name, name_label_packet.buffer)) {
                         name_label_packet.deinit(allocator);
 
@@ -284,8 +288,87 @@ fn innerParse(
             }
 
             const syrup_spec: ?Writer.spec.Struct = if (@hasDecl(T, Writer.s_syrup_spec)) T.syrup_spec else null;
-            // TODO hash map
+
             const start_token = try source.next();
+
+            const is_hash_map_like = @hasDecl(T, "KV");
+            if (syrup_spec == null and is_hash_map_like) {
+                const is_managed = std.meta.hasFn(T, "init");
+
+                var r: T = if (is_managed)
+                    .init(allocator)
+                else if (@hasDecl(T, "empty"))
+                    .empty
+                else
+                    @compileError("found hashmap or set-like structure '" ++ @typeName(T) ++ "', but it was missing .empty decl or init() function");
+
+                const kv_fields = @typeInfo(@field(T, "KV")).@"struct".fields;
+                const K = kv_fields[0].type;
+                const V = kv_fields[1].type;
+                switch (V) {
+                    void => {
+                        if (start_token != .set_start) {
+                            return error.UnexpectedToken;
+                        }
+
+                        // TODO: we may want to have an error for duplicate keys,
+                        // for now we just clobber.
+                        if (std.meta.hasFn(T, "put")) {
+                            while (true) {
+                                switch (try source.peekNextTokenType()) {
+                                    .set_end => break,
+                                    .dictionary_end,
+                                    .record_end,
+                                    .sequence_end,
+                                    .end_of_document,
+                                    => return error.UnexpectedToken,
+                                    else => {},
+                                }
+
+                                const key = try innerParse(K, allocator, source, options);
+                                if (is_managed) {
+                                    try r.put(key, {});
+                                } else {
+                                    try r.put(allocator, key, {});
+                                }
+                            }
+                        } else @compileError("Found what looks like a set (has a KV decl with a void value) but it doesn't have `put` function");
+                    },
+                    else => {
+                        if (start_token != .dictionary_start) {
+                            return error.UnexpectedToken;
+                        }
+
+                        // TODO: we may want to have an error for duplicate keys,
+                        // for now we just clobber.
+                        if (std.meta.hasFn(T, "put")) {
+                            while (true) {
+                                switch (try source.peekNextTokenType()) {
+                                    .dictionary_end => break,
+                                    .set_end,
+                                    .record_end,
+                                    .sequence_end,
+                                    .end_of_document,
+                                    => return error.UnexpectedToken,
+                                    else => {},
+                                }
+
+                                const key = try innerParse(K, allocator, source, options);
+                                const value = try innerParse(V, allocator, source, options);
+                                if (is_managed) {
+                                    try r.put(key, value);
+                                } else {
+                                    try r.put(allocator, key, value);
+                                }
+                            }
+                        } else @compileError("Found what looks like a dictionary (has a KV decl with non-void value) but it doesn't have `put` function");
+                    },
+                }
+
+                // consume the end token.
+                _ = try source.next();
+                return r;
+            }
 
             const structure_type: CollectionMode = switch (start_token) {
                 .sequence_start => if (syrup_spec) |spec| switch (spec.format) {
@@ -874,4 +957,37 @@ test "dictionary-like array of bytestrings" {
 
     const res: [32]u8 = "58848384848583848483838283858283".*;
     try std.testing.expectEqual(res, parsed.value.s);
+}
+
+test "parse to hashmap of dynamic values" {
+    const parsed = try parseFromSlice(std.StringHashMapUnmanaged(dynamic.Value), std.testing.allocator, "{3'hey6\"catcat4'hiya[45+46-]}", .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualDeep(dynamic.Value{ .string = "catcat" }, parsed.value.get("hey").?);
+    try std.testing.expectEqualDeep(dynamic.Value{
+        .sequence = &[_]dynamic.Value{
+            .{ .int = .{ .i32 = 45 } },
+            .{ .int = .{ .i32 = -46 } },
+        },
+    }, parsed.value.get("hiya").?);
+}
+
+test "parse to set" {
+    const parsed = try parseFromSlice(std.StringHashMapUnmanaged(void), std.testing.allocator, "#2'fo7\"bafjisz2'go3\"goo$", .{});
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value.contains("go"));
+    try std.testing.expect(parsed.value.contains("fo"));
+}
+
+const HashmapUnion = union(enum) {
+    first: std.AutoHashMap(u32, DictArr),
+    second: std.AutoHashMap([2]i32, []const u8),
+};
+
+test "parse to union of hashmaps" {
+    const parsed = try parseFromSlice([2]HashmapUnion, std.testing.allocator, "[{6'second{[11-11-]4\"boop[56-82+]7\"fkalsfk}}{5'first{3+[1'q32:abababababababababababababababab1's32:fjfjfjfjfjfjfjfjfjfjfjfjfjfjfjfj]}}]", .{});
+    defer parsed.deinit();
+
+    try std.testing.expectEqualDeep(DictArr{ .q = "abababababababababababababababab".*, .s = "fjfjfjfjfjfjfjfjfjfjfjfjfjfjfjfj".* }, parsed.value[1].first.get(3));
+    try std.testing.expectEqualDeep("fkalsfk", parsed.value[0].second.get([2]i32{ -56, 82 }));
+    try std.testing.expectEqualDeep("boop", parsed.value[0].second.get([2]i32{ -11, -11 }));
 }
